@@ -47,7 +47,8 @@ __global__ void emulsionKernel(ImageView source, ImageView output, RenderWindow 
     if (!pixel) return;
     // За пределами источника не формируем плотность чёрного кадра: там прозрачная пустота.
     const auto* input = address(source, x, y);
-    const auto value = input ? emulsionPixel({input[0], input[1], input[2], input[3]}, parameters) : Pixel{};
+    const int imageWidth = source.x2 - source.x1;
+    const auto value = input ? emulsionPixel({input[0], input[1], input[2], input[3]}, parameters, x, y, imageWidth) : Pixel{};
     pixel[0] = value.r; pixel[1] = value.g; pixel[2] = value.b; pixel[3] = value.a;
 }
 

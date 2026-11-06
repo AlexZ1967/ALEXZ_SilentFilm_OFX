@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
@@ -75,6 +76,7 @@ struct Instance {
     OfxParamHandle offset = nullptr;
     OfxParamHandle exposure = nullptr, contrast = nullptr, shadow = nullptr, highlight = nullptr, fog = nullptr;
     OfxParamHandle encoding = nullptr, positivePreview = nullptr;
+    OfxParamHandle grainStrength = nullptr, grainSize = nullptr, grainSeed = nullptr;
 };
 
 /** Fetch instance state without storing image handles across render actions. */
@@ -115,19 +117,25 @@ Settings settingsAt(Instance& state, double time)
 /** Evaluate exposure/development controls independently from the diagnostic effect. */
 silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
 {
-    double exposure = 0, contrast = 1, shadow = 0, highlight = 0, fog = 0;
+    double exposure = 0, contrast = 1, shadow = 0, highlight = 0, fog = 0, grainStrength = 0, grainSize = 2;
     int encoding = 0, preview = 0;
+    int grainSeed = 1925;
     require(parameters->paramGetValueAtTime(state.exposure, time, &exposure), "read film exposure");
     require(parameters->paramGetValueAtTime(state.contrast, time, &contrast), "read film contrast");
     require(parameters->paramGetValueAtTime(state.shadow, time, &shadow), "read film shadow compression");
     require(parameters->paramGetValueAtTime(state.highlight, time, &highlight), "read film highlight compression");
     require(parameters->paramGetValueAtTime(state.fog, time, &fog), "read film fog");
+    require(parameters->paramGetValueAtTime(state.grainStrength, time, &grainStrength), "read grain strength");
+    require(parameters->paramGetValueAtTime(state.grainSize, time, &grainSize), "read grain size");
+    require(parameters->paramGetValueAtTime(state.grainSeed, time, &grainSeed), "read grain seed");
     require(parameters->paramGetValueAtTime(state.encoding, time, &encoding), "read film encoding");
     if (state.positivePreview) require(parameters->paramGetValueAtTime(state.positivePreview, time, &preview), "read positive preview");
     if (!std::isfinite(time) || !std::isfinite(exposure) || !std::isfinite(contrast)
         || !std::isfinite(shadow) || !std::isfinite(highlight) || !std::isfinite(fog)
+        || !std::isfinite(grainStrength) || !std::isfinite(grainSize)
         || exposure < -4 || exposure > 4 || contrast < 0.2 || contrast > 3
         || shadow < 0 || shadow > 1 || highlight < 0 || highlight > 1 || fog < 0 || fog > 1
+        || grainStrength < 0 || grainStrength > 0.2 || grainSize < 0.1 || grainSize > 16
         || encoding < 0 || encoding > 2 || preview < 0 || preview > 1) {
         throw Failure(kOfxStatErrValue, "Invalid film parameter value");
     }
@@ -139,6 +147,12 @@ silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
     value.shadowSoftness = static_cast<float>(shadow);
     value.highlightSoftness = static_cast<float>(highlight);
     value.fog = static_cast<float>(fog);
+    value.grainStrength = static_cast<float>(grainStrength);
+    value.grainSize = static_cast<float>(grainSize);
+    value.grainSeed = static_cast<std::uint32_t>(grainSeed)
+        ^ (state.kind == EffectKind::Negative ? 0x4e454741u : 0x5052494eu);
+    const float frameTime = static_cast<float>(time);
+    std::memcpy(&value.grainFrame, &frameTime, sizeof(frameTime));
     value.previewPositive = preview != 0;
     return value;
 }
@@ -312,6 +326,7 @@ void defineDouble(OfxParamSetHandle set, const char* name, const char* label, co
 void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
 {
     const bool negative = kind == EffectKind::Negative;
+    OfxPropertySetHandle props = nullptr;
     defineDouble(set, "exposure_ev", negative ? "Negative Exposure (EV)" : "Print Exposure (EV)",
         negative ? "0 is neutral. Positive EV increases negative exposure and brightens the printed image."
                  : "0 is neutral. Positive EV increases positive-stock exposure and darkens the print.", -4, 4);
@@ -320,7 +335,16 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     defineDouble(set, "shadow_softness", "Shadow Compression", "0 is off. Compress scene shadows in this stock's density response.", 0, 1);
     defineDouble(set, "highlight_softness", "Highlight Compression", "0 is off. Compress scene highlights in this stock's density response.", 0, 1);
     defineDouble(set, "fog_strength", "Base Fog", "0 is off. Add fixed optical density to this stock; no automatic compensation.", 0, 1);
-    OfxPropertySetHandle props = nullptr;
+    defineDouble(set, "grain_strength", "Emulsion Grain", "0 is off. Adds deterministic clustered grain in optical-density space. Start near 0.02–0.04 for Negative and 0–0.015 for Print.", 0, 0.2);
+    defineDouble(set, "grain_size", "Grain Size", "Structure scale relative to a 1920-pixel-wide image; it scales with render resolution and proxy size.", 0.1, 16, 2);
+    require(parameters->paramDefine(set, kOfxParamTypeInteger, "grain_seed", &props), "define grain seed");
+    require(properties->propSetString(props, kOfxPropLabel, 0, "Grain Seed"), "grain seed label");
+    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Fixed seed makes the grain reproducible for a given render time and absolute image coordinates."), "grain seed hint");
+    require(properties->propSetInt(props, kOfxParamPropDefault, 0, 1925), "grain seed default");
+    require(properties->propSetInt(props, kOfxParamPropMin, 0, 0), "grain seed minimum");
+    require(properties->propSetInt(props, kOfxParamPropMax, 0, 2147483647), "grain seed maximum");
+    require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, 0), "grain seed display minimum");
+    require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 2147483647), "grain seed display maximum");
     require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &props), "define film encoding");
     require(properties->propSetString(props, kOfxPropLabel, 0, negative ? "Input Encoding" : "Output Encoding"), "encoding label");
     optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0,
@@ -338,7 +362,7 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     }
     require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &props), "define film page");
     int index = 0;
-    for (const char* name : {"exposure_ev", "contrast", "shadow_softness", "highlight_softness", "fog_strength", "encoding"}) {
+    for (const char* name : {"exposure_ev", "contrast", "shadow_softness", "highlight_softness", "fog_strength", "grain_strength", "grain_size", "grain_seed", "encoding"}) {
         require(properties->propSetString(props, kOfxParamPropPageChild, index++, name), "film page control");
     }
     if (negative) require(properties->propSetString(props, kOfxParamPropPageChild, index, "preview_positive"), "film page preview");
@@ -399,6 +423,9 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "shadow_softness", &state->shadow, nullptr), "film shadow parameter");
         require(parameters->paramGetHandle(set, "highlight_softness", &state->highlight, nullptr), "film highlight parameter");
         require(parameters->paramGetHandle(set, "fog_strength", &state->fog, nullptr), "film fog parameter");
+        require(parameters->paramGetHandle(set, "grain_strength", &state->grainStrength, nullptr), "grain strength parameter");
+        require(parameters->paramGetHandle(set, "grain_size", &state->grainSize, nullptr), "grain size parameter");
+        require(parameters->paramGetHandle(set, "grain_seed", &state->grainSeed, nullptr), "grain seed parameter");
         require(parameters->paramGetHandle(set, "encoding", &state->encoding, nullptr), "film encoding parameter");
         if (kind == EffectKind::Negative) require(parameters->paramGetHandle(set, "preview_positive", &state->positivePreview, nullptr), "film preview parameter");
     }
@@ -461,6 +488,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         emulsion.sourcePremultiplied = current.premultiplied();
         emulsion.outputPremultiplied = output.premultiplied();
     }
+    const auto currentView = current.view();
+    const int imageWidth = currentView.x2 - currentView.x1;
     std::unique_ptr<Image> previous, next;
     double previousTime = time, nextTime = time;
     if (settings.mix > 0) {
@@ -501,7 +530,7 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
             if (!destination) continue;
             const auto center = current.read(x, y);
             const auto value = isFilm
-                ? (current.address(x, y) ? silentfilm::emulsionPixel(center, emulsion) : silentfilm::Pixel{})
+                ? (current.address(x, y) ? silentfilm::emulsionPixel(center, emulsion, x, y, imageWidth) : silentfilm::Pixel{})
                 : silentfilm::probePixel(center, previous ? previous->read(x, y) : center,
                     next ? next->read(x, y) : center, gain, static_cast<float>(settings.mix));
             std::memcpy(destination, &value, sizeof(value));
@@ -546,9 +575,9 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 3, setHost, entry<EffectKind::Probe>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 3, setHost, entry<EffectKind::Negative>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 3, setHost, entry<EffectKind::Print>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 4, setHost, entry<EffectKind::Probe>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 4, setHost, entry<EffectKind::Negative>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 4, setHost, entry<EffectKind::Print>},
 };
 
 constexpr int pluginCount = static_cast<int>(sizeof(plugins) / sizeof(plugins[0]));

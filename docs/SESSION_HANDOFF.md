@@ -21,15 +21,16 @@
 1. Версия 0.2: Host Probe с gain, temporal mix и offset. CPU/CUDA, bounds, signed row stride, render window, identity, несколько экземпляров без накопительного состояния.
 2. Пользователь подтвердил сборку и CTest 2/2 PASS для 0.2. В Resolve подтвердил загрузку, работу, соседние кадры ±1/±4, границы и повторяемость при перемотке. В логе прочитана трасса `CUDA time=...`.
 3. Исправлена ошибка регистрации: отсутствие необязательного `kOfxPropPluginDescription` давало OFX status 3 и прерывало Describe. Теперь неизвестные optional metadata пропускаются; остальные ошибки не скрываются.
-4. Текущие исходники 0.3: три отдельных эффекта — `SilentFilm Host Probe`, `SilentFilm Negative`, `SilentFilm Print`. Новый общий CPU/CUDA файл математики — `include/silentfilm/sensitometry.hpp`.
+4. Версия 0.3: три отдельных эффекта — `SilentFilm Host Probe`, `SilentFilm Negative`, `SilentFilm Print`. `include/silentfilm/sensitometry.hpp` содержит общее CPU/CUDA-ядро сенситометрии.
 5. Пользователь подтвердил, что все тесты 0.3 прошли и Negative → Print правильно работает в Resolve. Состав ручной проверки и полный лог тестового прогона не предоставлены; детали экспорта, отмены и alpha отдельно не фиксировались.
+6. В коде версии 0.4 добавлено многомасштабное детерминированное зерно эмульсии в Negative/Print. CPU и CUDA используют общий пиксельный код; UI: Emulsion Grain, Grain Size, Grain Seed. Значение силы по умолчанию — 0. Тесты и Resolve для изменений 0.4 не запускались; CUDA parity тест пока не упражняет зерно.
 
-**Следующий шаг:** следующий этап плана — оптика, grain и отдельные дефекты. Перед началом открыть соответствующий раздел `docs/PLAN_LINUX_FIRST.md`; не считать подготовленный код Camera/Cadence или оптики уже реализованным — их пока нет.
+**Следующий шаг:** пользователь собирает и проверяет версию 0.4. Затем продолжается этап 4 плана: halation, оптика Camera, glow Projector и самостоятельные дефекты. Не считать эти эффекты или Camera/Cadence реализованными.
 
 ## Важные решения
 
 - Один OFX bundle, несколько самостоятельных эффектов; общий adapter, независимое от хоста ядро.
-- Native IDs: `com.alexz.silentfilm.hostprobe`, `com.alexz.silentfilm.negative`, `com.alexz.silentfilm.print`; текущая версия 0.3.
+- Native IDs: `com.alexz.silentfilm.hostprobe`, `com.alexz.silentfilm.negative`, `com.alexz.silentfilm.print`; текущая версия исходников 0.4, версия 0.3 подтверждена в Resolve.
 - GPU-путь согласуется через `CudaEnabled`/`CudaStream`. Не разыменовывать GPU pointers на CPU, не менять device/context хоста, не использовать `cudaDeviceSynchronize` в render.
 - При host stream kernel ставится в эту очередь без ожидания; без stream завершается собственный default-stream запуск. Host image handles освобождаются в пределах action.
 - Negative выдаёт физическое пропускание, Print принимает его без декодирования как sRGB. Экспозиция Negative со знаком плюс осветляет итоговую копию; экспозиция Print со знаком плюс затемняет.
@@ -48,6 +49,6 @@ cmake --build build-cuda --parallel 2
 ctest --test-dir build-cuda --output-on-failure
 ```
 
-В 0.3 ожидаются core, sensitometry и CUDA parity. При передаче следующей команды не требовать Conda. Установка после закрытия Resolve: `sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/` — её выполняет пользователь.
+Для версии 0.4 пользователь может пересобрать настроенную CUDA-конфигурацию командами `cmake --build build-cuda --parallel 2` и `ctest --test-dir build-cuda --output-on-failure`; это выполняет пользователь. Существующий parity тест ещё не включает ненулевое зерно. Установка после закрытия Resolve: `sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/` — её выполняет пользователь.
 
-Git инициализирован на `main`, но первого коммита/remote ещё нет; исходники пока не закоммичены. Локальный `.code-workspace` с путями этой машины исключён из Git.
+Git: `main` отслеживает `origin/main`; последний известный опубликованный коммит до незакоммиченных изменений зерна — `33baa36`. Локальный `.code-workspace` с путями этой машины исключён из Git.

@@ -3,6 +3,7 @@
 #include "silentfilm/probe.hpp"
 
 #include <cmath>
+#include <cstdint>
 
 #if defined(__CUDACC__)
 #define SILENTFILM_FILM_HD __host__ __device__
@@ -26,6 +27,10 @@ struct EmulsionParameters {
     bool previewPositive = false;
     bool sourcePremultiplied = false;
     bool outputPremultiplied = false;
+    float grainStrength = 0;
+    float grainSize = 1;
+    std::uint32_t grainSeed = 0;
+    std::uint32_t grainFrame = 0;
 };
 
 namespace film {
@@ -35,6 +40,67 @@ constexpr float negativeGamma = 0.65f;
 constexpr float negativeBase = 0.1f;
 constexpr float negativeWhite = 2.7f;
 constexpr float printBase = 0.02f;
+constexpr std::uint32_t emulsionGrainAlgorithmVersion = 1u;
+
+/** Mix counter-based coordinates into a device-independent integer hash. */
+SILENTFILM_FILM_HD inline std::uint32_t hash(std::uint32_t value) noexcept
+{
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    value *= 0x846ca68bu;
+    value ^= value >> 16;
+    return value;
+}
+
+/** Return a stable uniform variate for an absolute lattice coordinate. */
+SILENTFILM_FILM_HD inline float randomLattice(int x, int y, std::uint32_t seed, std::uint32_t channel) noexcept
+{
+    std::uint32_t value = seed ^ (static_cast<std::uint32_t>(x) * 0x9e3779b9u)
+        ^ (static_cast<std::uint32_t>(y) * 0x85ebca6bu) ^ (channel * 0xc2b2ae35u);
+    return static_cast<float>(hash(value) >> 8) * (1.0f / 16777216.0f);
+}
+
+/** Approximate unit Gaussian noise from three independent stable uniforms. */
+SILENTFILM_FILM_HD inline float gaussianLattice(int x, int y, std::uint32_t seed, std::uint32_t channel) noexcept
+{
+    return 2.0f * (randomLattice(x, y, seed, channel)
+        + randomLattice(x, y, seed, channel + 1u)
+        + randomLattice(x, y, seed, channel + 2u) - 1.5f);
+}
+
+/** Bilinearly interpolate a smooth, counter-based Gaussian field. */
+SILENTFILM_FILM_HD inline float grainNoise(float x, float y, float spacing,
+    std::uint32_t seed, std::uint32_t channel) noexcept
+{
+    const float gx = x / spacing, gy = y / spacing;
+    const int ix = static_cast<int>(::floorf(gx)), iy = static_cast<int>(::floorf(gy));
+    const float fx = gx - ix, fy = gy - iy;
+    const float sx = fx * fx * (3.0f - 2.0f * fx), sy = fy * fy * (3.0f - 2.0f * fy);
+    const float a = gaussianLattice(ix, iy, seed, channel);
+    const float b = gaussianLattice(ix + 1, iy, seed, channel);
+    const float c = gaussianLattice(ix, iy + 1, seed, channel);
+    const float d = gaussianLattice(ix + 1, iy + 1, seed, channel);
+    return (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy;
+}
+
+/** Build clustered emulsion grain from stable coordinates, independent of render order. */
+SILENTFILM_FILM_HD inline float emulsionGrain(int x, int y, int imageWidth,
+    const EmulsionParameters& parameters) noexcept
+{
+    if (parameters.grainStrength <= 0 || imageWidth <= 0) return 0;
+    const float effectiveSize = parameters.grainSize * static_cast<float>(imageWidth) / 1920.0f;
+    const float scale = ::fmaxf(0.35f, effectiveSize);
+    const auto seed = parameters.grainSeed ^ hash(parameters.grainFrame)
+        ^ (emulsionGrainAlgorithmVersion * 0x27d4eb2du);
+    const float fine = grainNoise(static_cast<float>(x), static_cast<float>(y), scale, seed, 0u);
+    const float mid = grainNoise(static_cast<float>(x), static_cast<float>(y), scale * 2.0f, seed, 16u);
+    const float coarse = grainNoise(static_cast<float>(x), static_cast<float>(y), scale * 4.0f, seed, 32u);
+    const float envelope = grainNoise(static_cast<float>(x), static_cast<float>(y), scale * 6.0f, seed, 48u);
+    const float clump = 0.78f + 0.48f / (1.0f + ::expf(-1.3f * envelope));
+    const float field = ::tanhf((fine * clump + mid * 0.42f + coarse * 0.24f) * 1.25f);
+    return field * parameters.grainStrength * ::fminf(1.0f, effectiveSize);
+}
 
 /** Bound the intentionally normalized SDR material domain. */
 SILENTFILM_FILM_HD inline float clamp(float value, float low, float high) noexcept
@@ -119,7 +185,8 @@ SILENTFILM_FILM_HD inline float viewPositive(float density, Transfer transfer) n
 } // namespace film
 
 /** Process a monochrome film stage while respecting the host alpha representation. */
-SILENTFILM_FILM_HD inline Pixel emulsionPixel(Pixel source, const EmulsionParameters& parameters) noexcept
+SILENTFILM_FILM_HD inline Pixel emulsionPixel(Pixel source, const EmulsionParameters& parameters,
+    int x = 0, int y = 0, int imageWidth = 0) noexcept
 {
     const float alpha = source.a;
     if (parameters.sourcePremultiplied) {
@@ -131,7 +198,9 @@ SILENTFILM_FILM_HD inline Pixel emulsionPixel(Pixel source, const EmulsionParame
         const float linear = film::decode(source.r, parameters.transfer) * 0.2126f
             + film::decode(source.g, parameters.transfer) * 0.7152f
             + film::decode(source.b, parameters.transfer) * 0.0722f;
-        value = film::transmittance(film::negativeDensity(linear, parameters));
+        const float density = film::negativeDensity(linear, parameters)
+            + film::emulsionGrain(x, y, imageWidth, parameters);
+        value = film::transmittance(density);
         if (parameters.previewPositive) {
             EmulsionParameters reference;
             value = film::viewPositive(film::printDensity(value, reference), parameters.transfer);
@@ -139,7 +208,9 @@ SILENTFILM_FILM_HD inline Pixel emulsionPixel(Pixel source, const EmulsionParame
     } else {
         // Пропускание негатива не декодируется как sRGB/Log, даже если так настроен viewer.
         const float transmission = source.r * 0.299f + source.g * 0.587f + source.b * 0.114f;
-        value = film::viewPositive(film::printDensity(transmission, parameters), parameters.transfer);
+        const float density = film::printDensity(transmission, parameters)
+            + film::emulsionGrain(x, y, imageWidth, parameters);
+        value = film::viewPositive(density, parameters.transfer);
     }
     if (parameters.outputPremultiplied) value *= alpha;
     return {value, value, value, alpha};
