@@ -1,0 +1,7 @@
+/build*/
+/.vscode/
+/.playwright-mcp/
+*.ofx
+*.ofx.bundle/
+*.log
+/*.code-workspace
