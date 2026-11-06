@@ -21,16 +21,16 @@
 1. Версия 0.2: Host Probe с gain, temporal mix и offset. CPU/CUDA, bounds, signed row stride, render window, identity, несколько экземпляров без накопительного состояния.
 2. Пользователь подтвердил сборку и CTest 2/2 PASS для 0.2. В Resolve подтвердил загрузку, работу, соседние кадры ±1/±4, границы и повторяемость при перемотке. В логе прочитана трасса `CUDA time=...`.
 3. Исправлена ошибка регистрации: отсутствие необязательного `kOfxPropPluginDescription` давало OFX status 3 и прерывало Describe. Теперь неизвестные optional metadata пропускаются; остальные ошибки не скрываются.
-4. Версия 0.3: три отдельных эффекта — `SilentFilm Host Probe`, `SilentFilm Negative`, `SilentFilm Print`. `include/silentfilm/sensitometry.hpp` содержит общее CPU/CUDA-ядро сенситометрии.
+4. Версия 0.3 имела эффекты `SilentFilm Host Probe`, `SilentFilm Negative`, `SilentFilm Print`. В версии 0.4 добавлен `SilentFilm Camera` для статической виньетки.
 5. Пользователь подтвердил, что все тесты 0.3 прошли и Negative → Print правильно работает в Resolve. Состав ручной проверки и полный лог тестового прогона не предоставлены; детали экспорта, отмены и alpha отдельно не фиксировались.
-6. В коде версии 0.4 добавлено многомасштабное детерминированное зерно эмульсии в Negative/Print, расширена шкала Shadow Compression до 0–5 и подготовлены подробные русские parameter hints для Probe/Negative/Print. CPU и CUDA используют общую пиксельную математику; зерно по умолчанию выключено. Тесты и Resolve для изменений 0.4 не запускались; CUDA parity тест пока не упражняет зерно или расширенный диапазон теней.
+6. В коде версии 0.4 добавлено многомасштабное детерминированное зерно эмульсии в Negative/Print, расширена шкала Shadow Compression до 0–5, подготовлены подробные русские подсказки параметров и добавлен `SilentFilm Camera` с круговой виньеткой на CPU/CUDA. Виньетка использует полный image bounds, не зависит от render window, сохраняет alpha и имеет русские hints. Тесты и Resolve для изменений 0.4 не запускались; CUDA parity тест пока не упражняет зерно, расширенный диапазон теней или Camera.
 
-**Следующий шаг:** продолжать реализацию этапа 4 без ожидания проверки пользователя: halation, оптика Camera, glow Projector и самостоятельные дефекты. Пользователь проверит накопившиеся изменения версии 0.4 пакетом. Не считать перечисленные эффекты или Camera/Cadence реализованными.
+**Следующий шаг:** продолжать этап 4 без ожидания проверки пользователя: halation, размывающая оптика Camera, glow Projector и самостоятельные дефекты. Camera v0.4 пока означает только виньетку, без Cadence. Пользователь проверит накопившиеся изменения версии 0.4 пакетом.
 
 ## Важные решения
 
 - Один OFX bundle, несколько самостоятельных эффектов; общий adapter, независимое от хоста ядро.
-- Native IDs: `com.alexz.silentfilm.hostprobe`, `com.alexz.silentfilm.negative`, `com.alexz.silentfilm.print`; текущая версия исходников 0.4, версия 0.3 подтверждена в Resolve.
+- Native IDs: `com.alexz.silentfilm.hostprobe`, `com.alexz.silentfilm.camera`, `com.alexz.silentfilm.negative`, `com.alexz.silentfilm.print`; текущая версия исходников 0.4, в Resolve подтверждена только версия 0.3 без Camera.
 - GPU-путь согласуется через `CudaEnabled`/`CudaStream`. Не разыменовывать GPU pointers на CPU, не менять device/context хоста, не использовать `cudaDeviceSynchronize` в render.
 - При host stream kernel ставится в эту очередь без ожидания; без stream завершается собственный default-stream запуск. Host image handles освобождаются в пределах action.
 - Negative выдаёт физическое пропускание, Print принимает его без декодирования как sRGB. Экспозиция Negative со знаком плюс осветляет итоговую копию; экспозиция Print со знаком плюс затемняет.

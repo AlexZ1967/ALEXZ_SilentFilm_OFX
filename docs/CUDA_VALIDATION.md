@@ -1,6 +1,6 @@
 # Проверка Linux CUDA backend
 
-Для Host Probe 0.2 пользователь подтвердил GPU-сборку на Linux (GCC 13.3, CUDA Toolkit 13.0.88, архитектура 86) и CTest 2/2 PASS, включая `silentfilm_cuda_parity`. В `ResolveDebug.txt` обнаружены строки `[ALEXZSilentFilmOFX] CUDA time=...` с temporal mix и offset 1/4: выбор CUDA в Resolve подтверждён. Для 0.3 с Negative/Print пользователь сообщил, что тесты прошли, но ручная проверка этих эффектов в Resolve ещё не подтверждена. Появление эффекта в библиотеке само по себе не доказывает использование CUDA: backend выбирает хост на каждый render.
+Для Host Probe 0.2 пользователь подтвердил GPU-сборку на Linux (GCC 13.3, CUDA Toolkit 13.0.88, архитектура 86) и CTest 2/2 PASS, включая `silentfilm_cuda_parity`. В `ResolveDebug.txt` обнаружены строки `[ALEXZSilentFilmOFX] CUDA time=...` с temporal mix и offset 1/4: выбор CUDA в Resolve подтверждён. Для версии 0.3 пользователь подтвердил прохождение тестов и правильную работу Negative → Print в Resolve. Изменения версии 0.4 (зерно, расширенная Shadow Compression, Camera) пока не проверялись; текущий parity тест не покрывает их. Появление эффекта в библиотеке само по себе не доказывает использование CUDA: backend выбирает хост на каждый render.
 
 ## Сборка
 
@@ -27,7 +27,7 @@ ctest --test-dir build-cuda --output-on-failure
 sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/
 ```
 
-ID Host Probe сохранён; в версии 0.3 bundle дополнен отдельными Negative/Print, minor version — 0.3. Повторно откройте Resolve и проверьте, что эффекты разрешены в Video Plugins. Системные файлы Resolve и SDK не меняются.
+ID прежних эффектов сохранены; в версии 0.4 bundle дополнен `SilentFilm Camera`, а minor version увеличен до 0.4. После пользовательской сборки повторно откройте Resolve и проверьте, что все эффекты разрешены в Video Plugins. Системные файлы Resolve и SDK не меняются.
 
 ## Подтверждение CUDA в Resolve
 

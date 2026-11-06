@@ -52,6 +52,22 @@ __global__ void emulsionKernel(ImageView source, ImageView output, RenderWindow 
     pixel[0] = value.r; pixel[1] = value.g; pixel[2] = value.b; pixel[3] = value.a;
 }
 
+/** Apply a width-relative vignette from absolute image coordinates without scratch storage. */
+__global__ void cameraKernel(ImageView source, ImageView output, RenderWindow window, CameraOpticsParameters parameters)
+{
+    const int x = window.x1 + static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = window.y1 + static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= window.x2 || y >= window.y2) return;
+    auto* destination = address(output, x, y);
+    if (!destination) return;
+    const auto* input = address(source, x, y);
+    const auto value = input
+        ? cameraPixel({input[0], input[1], input[2], input[3]}, x, y,
+            source.x1, source.y1, source.x2, source.y2, parameters)
+        : Pixel{};
+    destination[0] = value.r; destination[1] = value.g; destination[2] = value.b; destination[3] = value.a;
+}
+
 } // namespace
 
 CudaStatus renderCudaProbe(ImageView current, ImageView previous, ImageView next, ImageView output,
@@ -79,6 +95,20 @@ CudaStatus renderCudaEmulsion(ImageView source, ImageView output, RenderWindow w
                       (static_cast<unsigned>(window.y2 - window.y1) + threads.y - 1) / threads.y);
     const auto cudaStream = static_cast<cudaStream_t>(stream);
     emulsionKernel<<<blocks, threads, 0, cudaStream>>>(source, output, window, parameters);
+    auto status = cudaPeekAtLastError();
+    if (status == cudaSuccess && !hostStreamProvided) status = cudaStreamSynchronize(cudaStream);
+    return {static_cast<int>(status), status == cudaSuccess ? nullptr : cudaGetErrorString(status)};
+}
+
+CudaStatus renderCudaCamera(ImageView source, ImageView output, RenderWindow window,
+    CameraOpticsParameters parameters, void* stream, bool hostStreamProvided) noexcept
+{
+    if (window.x2 <= window.x1 || window.y2 <= window.y1) return {0, nullptr};
+    const dim3 threads(16, 16);
+    const dim3 blocks((static_cast<unsigned>(window.x2 - window.x1) + threads.x - 1) / threads.x,
+                      (static_cast<unsigned>(window.y2 - window.y1) + threads.y - 1) / threads.y);
+    const auto cudaStream = static_cast<cudaStream_t>(stream);
+    cameraKernel<<<blocks, threads, 0, cudaStream>>>(source, output, window, parameters);
     auto status = cudaPeekAtLastError();
     if (status == cudaSuccess && !hostStreamProvided) status = cudaStreamSynchronize(cudaStream);
     return {static_cast<int>(status), status == cudaSuccess ? nullptr : cudaGetErrorString(status)};
