@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include "silentfilm/optics.hpp"
 #include "silentfilm/sensitometry.hpp"
 
 namespace silentfilm {
@@ -28,9 +27,5 @@ CudaStatus renderCudaProbe(ImageView current, ImageView previous, ImageView next
 /** Enqueue one negative or print pass using the same calibrated math as the CPU core. */
 CudaStatus renderCudaEmulsion(ImageView source, ImageView output, RenderWindow window,
     EmulsionParameters parameters, void* stream, bool hostStreamProvided) noexcept;
-
-/** Enqueue the deterministic camera vignette on the selected host/default stream. */
-CudaStatus renderCudaCamera(ImageView source, ImageView output, RenderWindow window,
-    CameraOpticsParameters parameters, void* stream, bool hostStreamProvided) noexcept;
 
 } // namespace silentfilm

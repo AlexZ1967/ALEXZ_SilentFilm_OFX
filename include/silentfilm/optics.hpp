@@ -4,24 +4,25 @@
 
 #include <cmath>
 
-#if defined(__CUDACC__)
-#define SILENTFILM_OPTICS_HD __host__ __device__
-#else
-#define SILENTFILM_OPTICS_HD
-#endif
-
 namespace silentfilm {
 
 struct CameraOpticsParameters {
     float vignetteStrength = 0;
+    float edgeSoftness = 0;
     float edgeStart = 0.6f;
     float edgeEnd = 1.0f;
+    bool sourcePremultiplied = false;
+    bool outputPremultiplied = false;
 };
+
+struct ImageView;
+struct RenderWindow;
+using AbortCallback = bool (*)(void* context);
 
 namespace optics {
 
 /** Compute a circular mask using half the image width as the unit radius. */
-SILENTFILM_OPTICS_HD inline float lensEdgeMask(int x, int y, int x1, int y1, int x2, int y2,
+inline float lensEdgeMask(int x, int y, int x1, int y1, int x2, int y2,
     const CameraOpticsParameters& parameters) noexcept
 {
     const float width = static_cast<float>(x2 - x1);
@@ -41,16 +42,8 @@ SILENTFILM_OPTICS_HD inline float lensEdgeMask(int x, int y, int x1, int y1, int
 
 } // namespace optics
 
-/** Apply static capture-lens falloff while preserving the host alpha channel. */
-SILENTFILM_OPTICS_HD inline Pixel cameraPixel(Pixel source, int x, int y,
-    int x1, int y1, int x2, int y2, const CameraOpticsParameters& parameters) noexcept
-{
-    if (parameters.vignetteStrength <= 0) return source;
-    const float mask = optics::lensEdgeMask(x, y, x1, y1, x2, y2, parameters);
-    const float gain = 1.0f - mask * parameters.vignetteStrength;
-    return {source.r * gain, source.g * gain, source.b * gain, source.a};
-}
+/** Apply monochrome capture optics, variable edge blur, vignette and alpha conversion. */
+bool renderCameraCpu(ImageView source, ImageView output, RenderWindow window,
+    const CameraOpticsParameters& parameters, AbortCallback abort, void* context);
 
 } // namespace silentfilm
-
-#undef SILENTFILM_OPTICS_HD

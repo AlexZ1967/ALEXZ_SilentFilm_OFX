@@ -21,7 +21,7 @@ else()
     message(FATAL_ERROR "Для этой платформы ещё не определён каталог OpenFX bundle.")
 endif()
 
-add_library(silentfilm_core STATIC src/core/probe.cpp)
+add_library(silentfilm_core STATIC src/core/probe.cpp src/core/optics.cpp)
 target_include_directories(silentfilm_core PUBLIC include)
 target_compile_features(silentfilm_core PUBLIC cxx_std_17)
 set_target_properties(silentfilm_core PROPERTIES

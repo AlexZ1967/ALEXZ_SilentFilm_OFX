@@ -23,14 +23,15 @@
 3. Исправлена ошибка регистрации: отсутствие необязательного `kOfxPropPluginDescription` давало OFX status 3 и прерывало Describe. Теперь неизвестные optional metadata пропускаются; остальные ошибки не скрываются.
 4. Версия 0.3 имела эффекты `SilentFilm Host Probe`, `SilentFilm Negative`, `SilentFilm Print`. В версии 0.4 добавлен `SilentFilm Camera` для статической виньетки.
 5. Пользователь подтвердил, что все тесты 0.3 прошли и Negative → Print правильно работает в Resolve. Состав ручной проверки и полный лог тестового прогона не предоставлены; детали экспорта, отмены и alpha отдельно не фиксировались.
-6. В коде версии 0.4 добавлено многомасштабное детерминированное зерно эмульсии в Negative/Print, расширена шкала Shadow Compression до 0–5, подготовлены подробные русские подсказки параметров и добавлен `SilentFilm Camera` с круговой виньеткой на CPU/CUDA. Виньетка использует полный image bounds, не зависит от render window, сохраняет alpha и имеет русские hints. Тесты и Resolve для изменений 0.4 не запускались; CUDA parity тест пока не упражняет зерно, расширенный диапазон теней или Camera.
+6. Пользователь подтвердил, что тесты накопленного набора 0.4 прошли и всё работает. Этот набор включал зерно Negative/Print, диапазон Shadow Compression 0–5, русские подсказки и первую Camera-виньетку. Затем пользователь отметил, что Camera оставалась цветной и без краевого расфокуса, хотя Comfy делает монохром и variable edge blur.
+7. В текущих незакоммиченных изменениях Camera переведена на монохромный выход, переменный Gaussian blur по радиальной маске и виньетку в порядке Comfy. Реализация CPU-only и ожидает пакетной проверки пользователя; CUDA parity не покрывает Camera и предыдущие новые параметры.
 
-**Следующий шаг:** продолжать этап 4 без ожидания проверки пользователя: halation, размывающая оптика Camera, glow Projector и самостоятельные дефекты. Camera v0.4 пока означает только виньетку, без Cadence. Пользователь проверит накопившиеся изменения версии 0.4 пакетом.
+**Следующий шаг:** продолжать этап 4 без ожидания проверки: halation в эмульсиях, global softness/focus drift Camera, glow Projector и самостоятельные дефекты. После них — этап 5 Camera/Cadence. Пользователь проверит накопившиеся изменения одним пакетом.
 
 ## Важные решения
 
 - Один OFX bundle, несколько самостоятельных эффектов; общий adapter, независимое от хоста ядро.
-- Native IDs: `com.alexz.silentfilm.hostprobe`, `com.alexz.silentfilm.camera`, `com.alexz.silentfilm.negative`, `com.alexz.silentfilm.print`; текущая версия исходников 0.4, в Resolve подтверждена только версия 0.3 без Camera.
+- Native IDs: `com.alexz.silentfilm.hostprobe`, `com.alexz.silentfilm.camera`, `com.alexz.silentfilm.negative`, `com.alexz.silentfilm.print`; текущая версия исходников 0.4. Пользователь подтвердил предыдущий набор 0.4; текущая коррекция монохрома и Camera blur ожидает проверки.
 - GPU-путь согласуется через `CudaEnabled`/`CudaStream`. Не разыменовывать GPU pointers на CPU, не менять device/context хоста, не использовать `cudaDeviceSynchronize` в render.
 - При host stream kernel ставится в эту очередь без ожидания; без stream завершается собственный default-stream запуск. Host image handles освобождаются в пределах action.
 - Negative выдаёт физическое пропускание, Print принимает его без декодирования как sRGB. Экспозиция Negative со знаком плюс осветляет итоговую копию; экспозиция Print со знаком плюс затемняет.
@@ -49,6 +50,6 @@ cmake --build build-cuda --parallel 2
 ctest --test-dir build-cuda --output-on-failure
 ```
 
-Для версии 0.4 пользователь может пересобрать настроенную CUDA-конфигурацию командами `cmake --build build-cuda --parallel 2` и `ctest --test-dir build-cuda --output-on-failure`; это выполняет пользователь. Существующий parity тест ещё не включает ненулевое зерно или значения Shadow Compression выше 1. Установка после закрытия Resolve: `sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/` — её выполняет пользователь.
+Для пакетной проверки пользователь может выполнить `cmake --build build-cuda --parallel 2` и `ctest --test-dir build-cuda --output-on-failure`. Camera в текущем коде использует CPU, остальные эффекты могут использовать CUDA. Текущий parity тест не включает ненулевое зерно, значения Shadow Compression выше 1 или пространственную Camera-обработку. Установка после закрытия Resolve: `sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/` — её выполняет пользователь.
 
-Git: `main` отслеживает `origin/main`; последний известный опубликованный коммит до незакоммиченных изменений зерна — `33baa36`. Локальный `.code-workspace` с путями этой машины исключён из Git.
+Git: `main` отслеживает `origin/main`; последний опубликованный коммит до текущей незакоммиченной Camera-коррекции — `27b7f74`. Локальный `.code-workspace` с путями этой машины исключён из Git.

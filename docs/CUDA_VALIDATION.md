@@ -1,6 +1,6 @@
 # Проверка Linux CUDA backend
 
-Для Host Probe 0.2 пользователь подтвердил GPU-сборку на Linux (GCC 13.3, CUDA Toolkit 13.0.88, архитектура 86) и CTest 2/2 PASS, включая `silentfilm_cuda_parity`. В `ResolveDebug.txt` обнаружены строки `[ALEXZSilentFilmOFX] CUDA time=...` с temporal mix и offset 1/4: выбор CUDA в Resolve подтверждён. Для версии 0.3 пользователь подтвердил прохождение тестов и правильную работу Negative → Print в Resolve. Изменения версии 0.4 (зерно, расширенная Shadow Compression, Camera) пока не проверялись; текущий parity тест не покрывает их. Появление эффекта в библиотеке само по себе не доказывает использование CUDA: backend выбирает хост на каждый render.
+Для Host Probe 0.2 пользователь подтвердил GPU-сборку на Linux (GCC 13.3, CUDA Toolkit 13.0.88, архитектура 86) и CTest 2/2 PASS, включая `silentfilm_cuda_parity`. В `ResolveDebug.txt` обнаружены строки `[ALEXZSilentFilmOFX] CUDA time=...` с temporal mix и offset 1/4: выбор CUDA в Resolve подтверждён. Для версии 0.3 пользователь подтвердил прохождение тестов и правильную работу Negative → Print в Resolve. Пользователь также подтвердил тесты накопленного набора 0.4; CUDA parity тест не включает зерно, значения Shadow Compression выше 1 или Camera. Camera spatial optics в текущем коде выполняется CPU-only, остальные эффекты сохраняют CUDA. Появление эффекта в библиотеке само по себе не доказывает использование CUDA: backend выбирает хост на каждый render.
 
 ## Сборка
 

@@ -1,5 +1,6 @@
 #include "silentfilm/probe.hpp"
 #include "silentfilm/cuda_backend.hpp"
+#include "silentfilm/optics.hpp"
 
 #include <ofxImageEffect.h>
 #include <ofxGPURender.h>
@@ -78,7 +79,7 @@ struct Instance {
     OfxParamHandle exposure = nullptr, contrast = nullptr, shadow = nullptr, highlight = nullptr, fog = nullptr;
     OfxParamHandle encoding = nullptr, positivePreview = nullptr;
     OfxParamHandle grainStrength = nullptr, grainSize = nullptr, grainSeed = nullptr;
-    OfxParamHandle vignetteStrength = nullptr, edgeStart = nullptr, edgeEnd = nullptr;
+    OfxParamHandle vignetteStrength = nullptr, edgeSoftness = nullptr, edgeStart = nullptr, edgeEnd = nullptr;
 };
 
 /** Fetch instance state without storing image handles across render actions. */
@@ -163,15 +164,29 @@ silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
 /** Evaluate static camera-lens shading controls at the requested time. */
 silentfilm::CameraOpticsParameters cameraSettingsAt(Instance& state, double time)
 {
-    double strength = 0, start = 0.6, end = 1.0;
+    double strength = 0, softness = 0.15, start = 0.6, end = 1.0;
     require(parameters->paramGetValueAtTime(state.vignetteStrength, time, &strength), "read camera vignette strength");
+    require(parameters->paramGetValueAtTime(state.edgeSoftness, time, &softness), "read camera edge softness");
     require(parameters->paramGetValueAtTime(state.edgeStart, time, &start), "read camera vignette start");
     require(parameters->paramGetValueAtTime(state.edgeEnd, time, &end), "read camera vignette end");
-    if (!std::isfinite(time) || !std::isfinite(strength) || !std::isfinite(start) || !std::isfinite(end)
-        || strength < 0 || strength > 1 || start < 0 || start > 4 || end < 0.01 || end > 4 || end <= start) {
+    if (!std::isfinite(time) || !std::isfinite(strength) || !std::isfinite(softness)
+        || !std::isfinite(start) || !std::isfinite(end)
+        || strength < 0 || strength > 1 || softness < 0 || softness > 1
+        || start < 0 || start > 4 || end < 0.01 || end > 4 || end <= start) {
         throw Failure(kOfxStatErrValue, "Invalid camera optics parameter value");
     }
-    return {static_cast<float>(strength), static_cast<float>(start), static_cast<float>(end)};
+    silentfilm::CameraOpticsParameters value;
+    value.vignetteStrength = static_cast<float>(strength);
+    value.edgeSoftness = static_cast<float>(softness);
+    value.edgeStart = static_cast<float>(start);
+    value.edgeEnd = static_cast<float>(end);
+    return value;
+}
+
+/** Adapt the core's row-level cancellation callback to the OFX host suite. */
+bool cameraAbort(void* context)
+{
+    return effects->abort(static_cast<OfxImageEffectHandle>(context)) != 0;
 }
 
 /** Read the action time without truncating sub-frame requests. */
@@ -305,7 +320,7 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     const char* description = kind == EffectKind::Probe
         ? "Диагностический эффект для проверки усиления и доступа к соседним кадрам на CPU/CUDA. Это не плёночный вид."
         : kind == EffectKind::Camera
-        ? "Статическая круговая виньетка съёмочного объектива с масштабом от ширины кадра. Не меняет каденс и не размывает изображение."
+        ? "Монохромная съёмка со статической виньеткой и переменным расфокусом к краям. Каденс и движение камеры пока не моделируются."
         : "Калиброванная монохромная плёночная эмульсия с явным SDR-кодированием. Выход Negative — физическое пропускание плёнки.";
     optionalProperty(properties->propSetString(props, kOfxPropPluginDescription, 0, description), "plugin description");
     require(properties->propSetString(props, kOfxImageEffectPropSupportedContexts, 0, kOfxImageEffectContextFilter), "filter context");
@@ -320,8 +335,10 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     require(properties->propSetInt(props, kOfxImageEffectPropSupportsMultipleClipPARs, 0, 0), "multiple pixel aspects");
     require(properties->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0, kind == EffectKind::Probe && temporalAccess ? 1 : 0), "temporal capability");
 #ifdef SILENTFILM_ENABLE_CUDA
-    optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true"), "CUDA capability");
-    optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true"), "CUDA stream capability");
+    if (kind != EffectKind::Camera) {
+        optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true"), "CUDA capability");
+        optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true"), "CUDA stream capability");
+    }
 #endif
     return kOfxStatOK;
 }
@@ -399,14 +416,17 @@ void defineCameraControls(OfxParamSetHandle set)
 {
     defineDouble(set, "vignette_strength", "Vignette Strength",
         "Затемняет изображение по краям до заданной доли. 0 — выключено; начните с 0,10–0,15, значение 0,6 уже выраженное. Радиус и ширину перехода задают Edge Start и Edge End. Альфа не изменяется.", 0, 1, 0.12);
+    defineDouble(set, "edge_softness", "Edge Softness",
+        "Переменный расфокус по виньеточной маске: в центре резкость сохраняется, к краям радиус размытия растёт. 0 выключает; начните с 0,02–0,04, 0,15 уже заметно. При 1920 px значение 0,15 даёт максимальную sigma около 7,2 px. Обрабатывается CPU; детализация снижается сильнее при большом значении.", 0, 1, 0.15);
     defineDouble(set, "edge_start", "Edge Start",
         "Радиус начала виньетки в единицах половины ширины кадра. До этого радиуса центр не затемняется. Старт 0,6; меньшее значение распространяет переход ближе к центру.", 0, 4, 0.6);
     defineDouble(set, "edge_end", "Edge End",
         "Радиус полной силы виньетки в единицах половины ширины кадра. Старт 1,0; вместе с Edge Start задаёт плавность перехода. Должен быть больше Edge Start; если выходит за углы кадра, полная сила может не достигаться.", 0.01, 4, 1.0);
     OfxPropertySetHandle props = nullptr;
     require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &props), "define camera page");
-    for (int index = 0; index < 3; ++index) {
-        const char* name = index == 0 ? "vignette_strength" : index == 1 ? "edge_start" : "edge_end";
+    for (int index = 0; index < 4; ++index) {
+        const char* name = index == 0 ? "vignette_strength" : index == 1 ? "edge_softness"
+            : index == 2 ? "edge_start" : "edge_end";
         require(properties->propSetString(props, kOfxParamPropPageChild, index, name), "camera page control");
     }
 }
@@ -466,6 +486,7 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, offsetName, &state->offset, nullptr), "offset parameter");
     } else if (kind == EffectKind::Camera) {
         require(parameters->paramGetHandle(set, "vignette_strength", &state->vignetteStrength, nullptr), "camera vignette strength parameter");
+        require(parameters->paramGetHandle(set, "edge_softness", &state->edgeSoftness, nullptr), "camera edge softness parameter");
         require(parameters->paramGetHandle(set, "edge_start", &state->edgeStart, nullptr), "camera edge start parameter");
         require(parameters->paramGetHandle(set, "edge_end", &state->edgeEnd, nullptr), "camera edge end parameter");
     } else {
@@ -529,9 +550,10 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     const bool isEmulsion = state.kind == EffectKind::Negative || state.kind == EffectKind::Print;
     const auto settings = isProbe ? settingsAt(state, time) : Settings{};
     auto emulsion = isEmulsion ? filmSettingsAt(state, time) : silentfilm::EmulsionParameters{};
-    const auto camera = isCamera ? cameraSettingsAt(state, time) : silentfilm::CameraOpticsParameters{};
+    auto camera = isCamera ? cameraSettingsAt(state, time) : silentfilm::CameraOpticsParameters{};
     int cudaEnabled = 0;
     optionalProperty(properties->propGetInt(in, kOfxImageEffectPropCudaEnabled, 0, &cudaEnabled), "CUDA render mode");
+    if (isCamera && cudaEnabled) throw Failure(kOfxStatErrUnsupported, "SilentFilm Camera uses CPU spatial optics");
 #ifndef SILENTFILM_ENABLE_CUDA
     if (cudaEnabled) throw Failure(kOfxStatErrUnsupported, "This plugin was built without CUDA support");
 #endif
@@ -541,6 +563,9 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     if (isEmulsion) {
         emulsion.sourcePremultiplied = current.premultiplied();
         emulsion.outputPremultiplied = output.premultiplied();
+    } else if (isCamera) {
+        camera.sourcePremultiplied = current.premultiplied();
+        camera.outputPremultiplied = output.premultiplied();
     }
     const auto currentView = current.view();
     const int imageWidth = currentView.x2 - currentView.x1;
@@ -557,6 +582,11 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     }
     int window[4] = {};
     require(properties->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window), "render window");
+    if (isCamera) {
+        const silentfilm::RenderWindow region{window[0], window[1], window[2], window[3]};
+        silentfilm::renderCameraCpu(current.view(), output.view(), region, camera, cameraAbort, effect);
+        return kOfxStatOK;
+    }
     const float gain = silentfilm::gainFromEV(settings.gainEV);
 #ifdef SILENTFILM_ENABLE_CUDA
     if (cudaEnabled) {
@@ -567,8 +597,6 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         const silentfilm::RenderWindow region{window[0], window[1], window[2], window[3]};
         const auto status = isEmulsion
             ? silentfilm::renderCudaEmulsion(current.view(), output.view(), region, emulsion, stream, streamStatus == kOfxStatOK)
-            : isCamera
-            ? silentfilm::renderCudaCamera(current.view(), output.view(), region, camera, stream, streamStatus == kOfxStatOK)
             : silentfilm::renderCudaProbe(current.view(), previous ? previous->view() : current.view(),
                 next ? next->view() : current.view(), output.view(), region,
                 gain, static_cast<float>(settings.mix), stream, streamStatus == kOfxStatOK);
@@ -587,9 +615,6 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
             const auto center = current.read(x, y);
             const auto value = isEmulsion
                 ? (current.address(x, y) ? silentfilm::emulsionPixel(center, emulsion, x, y, imageWidth) : silentfilm::Pixel{})
-                : isCamera
-                ? silentfilm::cameraPixel(center, x, y, currentView.x1, currentView.y1,
-                    currentView.x2, currentView.y2, camera)
                 : silentfilm::probePixel(center, previous ? previous->read(x, y) : center,
                     next ? next->read(x, y) : center, gain, static_cast<float>(settings.mix));
             std::memcpy(destination, &value, sizeof(value));
