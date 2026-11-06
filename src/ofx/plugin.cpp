@@ -329,18 +329,25 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     const bool negative = kind == EffectKind::Negative;
     OfxPropertySetHandle props = nullptr;
     defineDouble(set, "exposure_ev", negative ? "Negative Exposure (EV)" : "Print Exposure (EV)",
-        negative ? "0 is neutral. Positive EV increases negative exposure and brightens the printed image."
-                 : "0 is neutral. Positive EV increases positive-stock exposure and darkens the print.", -4, 4);
+        negative ? "Нейтральное значение — 0 EV. Меняйте по 0,1–0,25 EV. Плюс увеличивает экспозицию негатива: сам негатив становится плотнее и темнее, а отпечаток после Print — светлее. Минус действует наоборот."
+                 : "Нейтральное значение — 0 EV. Меняйте по 0,1–0,25 EV. Плюс увеличивает экспозицию позитивной плёнки и затемняет отпечаток; минус уменьшает плотность и осветляет его. Это экспозиция печати, не яркость проектора.", -4, 4);
     defineDouble(set, "contrast", negative ? "Development Contrast" : "Print Contrast",
-        "1 is neutral. Lower values reduce contrast; higher values increase it around calibrated middle gray.", 0.2, 3, 1);
-    defineDouble(set, "shadow_softness", "Shadow Compression", "0 is off. Values 0–1 preserve the original range; values above 1 progressively strengthen shadow compression while keeping the tone curve monotonic.", 0, 5);
-    defineDouble(set, "highlight_softness", "Highlight Compression", "0 is off. Compress scene highlights in this stock's density response.", 0, 1);
-    defineDouble(set, "fog_strength", "Base Fog", "0 is off. Add fixed optical density to this stock; no automatic compensation.", 0, 1);
-    defineDouble(set, "grain_strength", "Emulsion Grain", "0 is off. Adds deterministic clustered grain in optical-density space. Start near 0.02–0.04 for Negative and 0–0.015 for Print.", 0, 0.2);
-    defineDouble(set, "grain_size", "Grain Size", "Structure scale relative to a 1920-pixel-wide image; it scales with render resolution and proxy size.", 0.1, 16, 2);
+        "Значение 1 — нейтральная проявка. Ниже 1 контраст мягче, выше 1 — жёстче относительно калиброванного среднего серого. Для сравнения меняйте контраст только на одном этапе за раз; контрасты негатива и печати действуют совместно.", 0.2, 3, 1);
+    defineDouble(set, "shadow_softness", "Shadow Compression",
+        "Сжимает тональные различия только в глубоких тенях, не размывает изображение. 0 — выключено; 0–1 — исходная шкала; значения выше 1 сильнее и шире воздействуют на тени, максимум 5. Для проверки сравните 0, 1 и 5 на тёмной шкале. Правильный Input Encoding важен для Negative.", 0, 5);
+    defineDouble(set, "highlight_softness", "Highlight Compression",
+        "Смягчает тональную характеристику в яркой области материала; 0 — выключено, 1 — максимальное значение. Не восстанавливает детали, уже срезанные до входа эффекта, и не размывает изображение. Начните с 0, затем попробуйте 0,1–0,3.", 0, 1);
+    defineDouble(set, "fog_strength", "Base Fog",
+        negative ? "Дополнительная базовая плотность негатива: 0 — чистая основа, 1 добавляет 0,25 единицы плотности. Через Print повышает яркость позитива. Не является подъёмом чёрного; начните с 0."
+                 : "Дополнительная базовая плотность позитивной плёнки: 0 — чистая основа, 1 добавляет 0,25 единицы плотности и затемняет отпечаток. Не заменяет экспозицию или контраст; начните с 0.", 0, 1);
+    defineDouble(set, "grain_strength", "Emulsion Grain",
+        negative ? "Сила многослойного зерна в оптической плотности негатива. 0 — выключено; начните с 0,02–0,04. Зерно негатива проходит через Print и появляется в позитиве. Для повторяемого рисунка используйте один Grain Seed."
+                 : "Сила многослойного зерна позитивной эмульсии. 0 — выключено; начните с 0–0,015, поскольку зерно негатива уже отпечатано. Зерно добавляется в плотность и зависит от Grain Size и Grain Seed.", 0, 0.2);
+    defineDouble(set, "grain_size", "Grain Size",
+        "Масштаб структуры относительно ширины кадра 1920 px. Значение 2 — стартовое; 1 даёт более мелкую, 3 — более крупную фактуру. Масштаб меняется вместе с разрешением и proxy; это не диаметр отдельного зерна.", 0.1, 16, 2);
     require(parameters->paramDefine(set, kOfxParamTypeInteger, "grain_seed", &props), "define grain seed");
     require(properties->propSetString(props, kOfxPropLabel, 0, "Grain Seed"), "grain seed label");
-    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Fixed seed makes the grain reproducible for a given render time and absolute image coordinates."), "grain seed hint");
+    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Фиксированный seed воспроизводит тот же рисунок при повторном render того же времени и координат. Negative и Print используют независимые потоки зерна."), "grain seed hint");
     require(properties->propSetInt(props, kOfxParamPropDefault, 0, 1925), "grain seed default");
     require(properties->propSetInt(props, kOfxParamPropMin, 0, 0), "grain seed minimum");
     require(properties->propSetInt(props, kOfxParamPropMax, 0, 2147483647), "grain seed maximum");
@@ -349,8 +356,8 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &props), "define film encoding");
     require(properties->propSetString(props, kOfxPropLabel, 0, negative ? "Input Encoding" : "Output Encoding"), "encoding label");
     optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0,
-        negative ? "Explicit Rec.709-primary SDR source encoding. Convert Log/DWG with a CST before this effect."
-                 : "Explicit positive output encoding. Match Negative input for a neutral pair; input to Print is raw film transmission."), "encoding hint");
+        negative ? "Кодирование входного SDR-сигнала с первичными Rec.709. Выберите Linear Rec.709, sRGB или Gamma 2.4 по фактическому сигналу до ноды. Не угадывайте по виду картинки. Для Log, DaVinci Wide Gamut или ACES сначала задайте явный CST в Rec.709 Linear."
+                 : "Кодирование готового SDR-позитива. Для нейтральной пары согласуйте его с Input Encoding у Negative. На вход Print получает физическое пропускание негатива: не ставьте CST, LUT или цветокоррекцию между Negative и Print."), "encoding hint");
     require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "encoding default");
     require(properties->propSetString(props, kOfxParamPropChoiceOption, 0, "Linear Rec.709"), "linear encoding");
     require(properties->propSetString(props, kOfxParamPropChoiceOption, 1, "sRGB"), "sRGB encoding");
@@ -358,7 +365,7 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     if (negative) {
         require(parameters->paramDefine(set, kOfxParamTypeBoolean, "preview_positive", &props), "define positive preview");
         require(properties->propSetString(props, kOfxPropLabel, 0, "View Positive (preview only)"), "preview label");
-        optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "View the actual negative through a fixed neutral print. Turn OFF before connecting to SilentFilm Print."), "preview hint");
+        optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Показывает пропускание негатива через фиксированную нейтральную печать. Для настройки временно отключите Print. Перед подачей сигнала в SilentFilm Print выключите этот режим: preview — уже позитив, а не негатив."), "preview hint");
         require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "preview default");
     }
     require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &props), "define film page");
@@ -387,12 +394,12 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         defineFilmControls(set, kind);
         return kOfxStatOK;
     }
-    defineDouble(set, gainName, "Diagnostic Gain (EV)", "0 passes RGB unchanged; +1 doubles RGB. This diagnostic gain does not decode a color transfer function.", -4, 4);
-    defineDouble(set, mixName, "Temporal Mix", "0 uses only the current frame; 1 blends 50% current and 25% from each neighbor. Requires host temporal access.", 0, 1);
+    defineDouble(set, gainName, "Diagnostic Gain (EV)", "Диагностическое усиление RGB без преобразования цветовой кривой: 0 — без изменения, +1 удваивает RGB, −1 делит RGB пополам. Альфа не меняется. Для Negative/Print используйте экспозицию плёнки.", -4, 4);
+    defineDouble(set, mixName, "Temporal Mix", "Смешивание текущего кадра с соседними: 0 — только текущий; 1 — 50% текущего и по 25% соседних. Требуется temporal access хоста. Это проверка доступа к кадрам, не optical flow.", 0, 1);
     OfxPropertySetHandle props = nullptr;
     require(parameters->paramDefine(set, kOfxParamTypeInteger, offsetName, &props), "define offset");
     require(properties->propSetString(props, kOfxPropLabel, 0, "Neighbor Offset (frames)"), "offset label");
-    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Neighbor distance in OFX time units (frames), clamped to the host source range."), "offset hint");
+    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Расстояние до соседних кадров в единицах времени OFX (кадрах), от 1 до 8. Используется только при Temporal Mix > 0; запрос ограничивается началом и концом исходного клипа."), "offset hint");
     require(properties->propSetInt(props, kOfxParamPropDefault, 0, 1), "offset default");
     require(properties->propSetInt(props, kOfxParamPropMin, 0, 1), "offset minimum");
     require(properties->propSetInt(props, kOfxParamPropMax, 0, 8), "offset maximum");
