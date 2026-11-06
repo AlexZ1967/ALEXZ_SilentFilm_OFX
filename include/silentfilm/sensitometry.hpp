@@ -31,6 +31,7 @@ struct EmulsionParameters {
     float grainSize = 1;
     std::uint32_t grainSeed = 0;
     std::uint32_t grainFrame = 0;
+    float shadowCurveScale = 1;
 };
 
 namespace film {
@@ -126,16 +127,17 @@ SILENTFILM_FILM_HD inline float encode(float value, Transfer transfer) noexcept
 
 /** Blend smooth toe and shoulder density limits around the straight-line response. */
 SILENTFILM_FILM_HD inline float softLimits(float density, float floor, float ceiling,
-    float lowKnee, float highKnee, float lowStrength, float highStrength) noexcept
+    float lowKnee, float highKnee, float lowStrength, float highStrength,
+    float lowCurveScale = 1, float highCurveScale = 1) noexcept
 {
     if (lowStrength > 0 && density < lowKnee) {
         const float span = lowKnee - floor;
-        const float curved = lowKnee + span * ::expm1f((density - lowKnee) / span);
+        const float curved = lowKnee + span * ::expm1f((density - lowKnee) / (span * lowCurveScale));
         density += lowStrength * (curved - density);
     }
     if (highStrength > 0 && density > highKnee) {
         const float span = ceiling - highKnee;
-        const float curved = highKnee - span * ::expm1f(-(density - highKnee) / span);
+        const float curved = highKnee - span * ::expm1f(-(density - highKnee) / (span * highCurveScale));
         density += highStrength * (curved - density);
     }
     return density;
@@ -158,7 +160,7 @@ SILENTFILM_FILM_HD inline float negativeDensity(float linear, const EmulsionPara
     return softLimits(density, negativeBase, negativeWhite,
         negativeWhite + negativeGamma * ::log10f(blackFloor + (1 - blackFloor) * 0.03f),
         negativeWhite + negativeGamma * ::log10f(blackFloor + (1 - blackFloor) * 0.5f),
-        parameters.shadowSoftness, parameters.highlightSoftness) + 0.25f * parameters.fog;
+        parameters.shadowSoftness, parameters.highlightSoftness, parameters.shadowCurveScale, 1) + 0.25f * parameters.fog;
 }
 
 /** Expose positive stock through the actual negative transmission and develop it. */
@@ -172,7 +174,7 @@ SILENTFILM_FILM_HD inline float printDensity(float transmission, const EmulsionP
     return softLimits(density, printBase, printBase - ::log10f(blackFloor),
         printBase - ::log10f(blackFloor + (1 - blackFloor) * 0.5f),
         printBase - ::log10f(blackFloor + (1 - blackFloor) * 0.03f),
-        parameters.highlightSoftness, parameters.shadowSoftness) + 0.25f * parameters.fog;
+        parameters.highlightSoftness, parameters.shadowSoftness, 1, parameters.shadowCurveScale) + 0.25f * parameters.fog;
 }
 
 /** Apply fixed reference viewing calibration with no image-dependent normalization. */

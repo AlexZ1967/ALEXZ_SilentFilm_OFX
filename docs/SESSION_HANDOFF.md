@@ -23,9 +23,9 @@
 3. Исправлена ошибка регистрации: отсутствие необязательного `kOfxPropPluginDescription` давало OFX status 3 и прерывало Describe. Теперь неизвестные optional metadata пропускаются; остальные ошибки не скрываются.
 4. Версия 0.3: три отдельных эффекта — `SilentFilm Host Probe`, `SilentFilm Negative`, `SilentFilm Print`. `include/silentfilm/sensitometry.hpp` содержит общее CPU/CUDA-ядро сенситометрии.
 5. Пользователь подтвердил, что все тесты 0.3 прошли и Negative → Print правильно работает в Resolve. Состав ручной проверки и полный лог тестового прогона не предоставлены; детали экспорта, отмены и alpha отдельно не фиксировались.
-6. В коде версии 0.4 добавлено многомасштабное детерминированное зерно эмульсии в Negative/Print. CPU и CUDA используют общий пиксельный код; UI: Emulsion Grain, Grain Size, Grain Seed. Значение силы по умолчанию — 0. Тесты и Resolve для изменений 0.4 не запускались; CUDA parity тест пока не упражняет зерно.
+6. В коде версии 0.4 добавлено многомасштабное детерминированное зерно эмульсии в Negative/Print и расширена шкала Shadow Compression до 0–5. CPU и CUDA используют общую пиксельную математику; зерно по умолчанию выключено. Тесты и Resolve для изменений 0.4 не запускались; CUDA parity тест пока не упражняет зерно или расширенный диапазон теней.
 
-**Следующий шаг:** пользователь собирает и проверяет версию 0.4. Затем продолжается этап 4 плана: halation, оптика Camera, glow Projector и самостоятельные дефекты. Не считать эти эффекты или Camera/Cadence реализованными.
+**Следующий шаг:** пользователь собирает и проверяет изменения версии 0.4, особенно новый диапазон Shadow Compression. Затем продолжается этап 4 плана: halation, оптика Camera, glow Projector и самостоятельные дефекты. Не считать эти эффекты или Camera/Cadence реализованными.
 
 ## Важные решения
 
@@ -49,6 +49,6 @@ cmake --build build-cuda --parallel 2
 ctest --test-dir build-cuda --output-on-failure
 ```
 
-Для версии 0.4 пользователь может пересобрать настроенную CUDA-конфигурацию командами `cmake --build build-cuda --parallel 2` и `ctest --test-dir build-cuda --output-on-failure`; это выполняет пользователь. Существующий parity тест ещё не включает ненулевое зерно. Установка после закрытия Resolve: `sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/` — её выполняет пользователь.
+Для версии 0.4 пользователь может пересобрать настроенную CUDA-конфигурацию командами `cmake --build build-cuda --parallel 2` и `ctest --test-dir build-cuda --output-on-failure`; это выполняет пользователь. Существующий parity тест ещё не включает ненулевое зерно или значения Shadow Compression выше 1. Установка после закрытия Resolve: `sudo cp -a build-cuda/ofx/ALEXZSilentFilm.ofx.bundle /usr/OFX/Plugins/` — её выполняет пользователь.
 
 Git: `main` отслеживает `origin/main`; последний известный опубликованный коммит до незакоммиченных изменений зерна — `33baa36`. Локальный `.code-workspace` с путями этой машины исключён из Git.

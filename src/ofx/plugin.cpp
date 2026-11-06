@@ -134,7 +134,7 @@ silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
         || !std::isfinite(shadow) || !std::isfinite(highlight) || !std::isfinite(fog)
         || !std::isfinite(grainStrength) || !std::isfinite(grainSize)
         || exposure < -4 || exposure > 4 || contrast < 0.2 || contrast > 3
-        || shadow < 0 || shadow > 1 || highlight < 0 || highlight > 1 || fog < 0 || fog > 1
+        || shadow < 0 || shadow > 5 || highlight < 0 || highlight > 1 || fog < 0 || fog > 1
         || grainStrength < 0 || grainStrength > 0.2 || grainSize < 0.1 || grainSize > 16
         || encoding < 0 || encoding > 2 || preview < 0 || preview > 1) {
         throw Failure(kOfxStatErrValue, "Invalid film parameter value");
@@ -144,7 +144,8 @@ silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
     value.transfer = static_cast<silentfilm::Transfer>(encoding);
     value.exposureEV = static_cast<float>(exposure);
     value.contrast = static_cast<float>(contrast);
-    value.shadowSoftness = static_cast<float>(shadow);
+    value.shadowSoftness = static_cast<float>(std::min(shadow, 1.0));
+    value.shadowCurveScale = static_cast<float>(std::max(shadow, 1.0));
     value.highlightSoftness = static_cast<float>(highlight);
     value.fog = static_cast<float>(fog);
     value.grainStrength = static_cast<float>(grainStrength);
@@ -332,7 +333,7 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
                  : "0 is neutral. Positive EV increases positive-stock exposure and darkens the print.", -4, 4);
     defineDouble(set, "contrast", negative ? "Development Contrast" : "Print Contrast",
         "1 is neutral. Lower values reduce contrast; higher values increase it around calibrated middle gray.", 0.2, 3, 1);
-    defineDouble(set, "shadow_softness", "Shadow Compression", "0 is off. Compress scene shadows in this stock's density response.", 0, 1);
+    defineDouble(set, "shadow_softness", "Shadow Compression", "0 is off. Values 0–1 preserve the original range; values above 1 progressively strengthen shadow compression while keeping the tone curve monotonic.", 0, 5);
     defineDouble(set, "highlight_softness", "Highlight Compression", "0 is off. Compress scene highlights in this stock's density response.", 0, 1);
     defineDouble(set, "fog_strength", "Base Fog", "0 is off. Add fixed optical density to this stock; no automatic compensation.", 0, 1);
     defineDouble(set, "grain_strength", "Emulsion Grain", "0 is off. Adds deterministic clustered grain in optical-density space. Start near 0.02–0.04 for Negative and 0–0.015 for Print.", 0, 0.2);
