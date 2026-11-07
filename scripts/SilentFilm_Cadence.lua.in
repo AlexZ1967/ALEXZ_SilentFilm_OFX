@@ -1,0 +1,301 @@
+-- Запуск из Workspace → Scripts. Только Linux; SDK и существующий монтаж не изменяются.
+local helper = [[@CMAKE_CURRENT_BINARY_DIR@/bin/silentfilm_cadence]]
+local defaultRoot = [[@CMAKE_CURRENT_SOURCE_DIR@/renders/cadence]]
+local defaultBackend = [[@SILENTFILM_CADENCE_DEFAULT_BACKEND@]]
+
+local resolveApp = resolve or (bmd and bmd.scriptapp("Resolve"))
+assert(resolveApp, "Resolve scripting API недоступен")
+local fusionApp = resolveApp:Fusion()
+local ui = fusionApp.UIManager
+assert(ui and bmd and bmd.UIDispatcher, "Для окна Cadence нужен UIManager Resolve Studio")
+local disp = bmd.UIDispatcher(ui)
+
+local function quote(s)
+    assert(not s:find("[\r\n%z]"), "Перевод строки в пути не поддерживается")
+    return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+local function exists(path)
+    local f = io.open(path, "rb")
+    if not f then return false end
+    f:close(); return true
+end
+local function readIni(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local result = {}
+    for line in f:lines() do
+        local key, value = line:match("^([^=]+)=(.*)$")
+        if key then result[key] = value:gsub("\r$", "") end
+    end
+    f:close(); return result
+end
+local function writeIni(path, values)
+    local f = assert(io.open(path, "wb"), "Нельзя записать " .. path)
+    for key, value in pairs(values) do
+        value = tostring(value)
+        assert(not value:find("[\r\n%z]"), "Перевод строки в параметре " .. key)
+        f:write(key, "=", value, "\n")
+    end
+    assert(f:close(), "Не удалось завершить запись " .. path)
+end
+local function command(s)
+    local a, _, c = os.execute(s)
+    return a == 0 or (a == true and (c == nil or c == 0))
+end
+local function decimal(s)
+    local value = tonumber(tostring(s):match("[+-]?%d+%.?%d*"))
+    assert(value and value > 0, "Нельзя определить FPS: " .. tostring(s))
+    return value
+end
+local function projectNow()
+    local project = resolveApp:GetProjectManager():GetCurrentProject()
+    assert(project, "Открой проект Resolve")
+    return project
+end
+
+local function edit(id, value, tip)
+    return ui:LineEdit{ID=id, Text=tostring(value), ToolTip=tip or ""}
+end
+local function row(label, id, value, tip)
+    return ui:HGroup{ui:Label{Text=label, Weight=0.42}, edit(id, value, tip)}
+end
+local win = disp:AddWindow({ID="CadenceWindow", WindowTitle="SilentFilm — Подготовить каденс", Geometry={160, 80, 800, 790}},
+    ui:VGroup{
+        ui:Label{Text="Один виртуальный кадр → один кадр показа. Новая длительность = число экспозиций / FPS показа."},
+        ui:Label{ID="Status", Text="Выбери исходник в списке текущей папки Media Pool или введи путь к файлу. Статус и ошибки — здесь и в Console.", WordWrap=true, MinimumSize={0, 58}},
+        ui:Label{Text="Источник: файл из списка Media Pool или явный путь. Камера запекается; результат без звука."},
+        ui:HGroup{ui:ComboBox{ID="SourceList"}, ui:Button{ID="SourceButton", Text="Обновить список"}},
+        ui:HGroup{edit("SourcePath", "", "Полный путь к исходному видео. Можно ввести вручную; тогда In/Out Media Pool не применяются."), ui:Button{ID="FileButton", Text="Принять путь"}},
+        row("Папка результатов", "Root", defaultRoot),
+        ui:HGroup{ui:Label{Text="Формат"}, ui:ComboBox{ID="Format"}, ui:Label{Text="Расчёт"}, ui:ComboBox{ID="Backend"}},
+        row("FPS показа", "OutputFps", 25, "Обычно FPS текущего таймлайна. Он не влияет на число снятых кадров."),
+        ui:HGroup{ui:Label{Text="FPS Min"}, edit("Min",16), ui:Label{Text="FPS Max"}, edit("Max",22), ui:Label{Text="Variation"}, edit("Variation",0.7)},
+        ui:HGroup{ui:Label{Text="Irregularity"}, edit("Irregularity",0.15), ui:Label{Text="Camera Seed"}, edit("Seed",1925)},
+        ui:HGroup{ui:Label{Text="Shutter"}, edit("Shutter",0.65), ui:Label{Text="Motion Blur"}, edit("Motion",0.8), ui:Label{Text="Samples"}, edit("Samples",5)},
+        ui:HGroup{ui:Label{Text="Exposure Link"}, edit("Exposure",1), ui:Label{Text="Camera Shake"}, edit("Shake",0.25)},
+        ui:HGroup{ui:Label{Text="Vignette"}, edit("Vignette",0.12), ui:Label{Text="Edge Softness"}, edit("EdgeSoft",0.15), ui:Label{Text="Global Softness"}, edit("Softness",0.1)},
+        ui:HGroup{ui:Label{Text="Edge Start"}, edit("EdgeStart",0.6), ui:Label{Text="Edge End"}, edit("EdgeEnd",1)},
+        ui:HGroup{ui:Label{Text="Focus Drift"}, edit("Focus",0.03), ui:Label{Text="Focus Seed"}, edit("FocusSeed",1925)},
+        ui:HGroup{ui:Label{Text="Вход Rec.709"}, ui:ComboBox{ID="Transfer"}, ui:CheckBox{ID="UseMarks", Text="In/Out Media Pool (для клипа из списка)", Checked=true}},
+        ui:Label{Text="ProRes 4444 — компактнее, кодирование с потерями. TIFF RGBA16 — без потерь, много места."},
+        ui:Label{Text="Вход должен быть CFR SDR Rec.709. Цветокоррекция и OFX таймлайна не запекаются. Выход — sRGB."},
+        row("Задание (можно открыть прежнее)", "Job", ""),
+        ui:HGroup{ui:Button{ID="Start", Text="Рассчитать"}, ui:Button{ID="Refresh", Text="Проверить / импортировать"}, ui:Button{ID="Cancel", Text="Остановить"}},
+        ui:Label{Text="Расчёт идёт в отдельном процессе. Окно можно закрыть; задание продолжится. Импорт создаёт новый таймлайн."},
+    })
+local items = win:GetItems()
+items.Format:AddItems({"ProRes 4444 MOV", "TIFF RGBA 16 bit"})
+items.Backend:AddItems({"CUDA", "CPU"})
+items.Backend.CurrentIndex = defaultBackend == "cuda" and 0 or 1
+items.Transfer:AddItems({"sRGB", "Rec.709 Gamma 2.4", "Linear Rec.709"})
+local activeJob, importedJob = nil, nil
+local sourceSnapshot = nil
+local sourceEntries, updatingSources, chosenListIndex = {}, false, 0
+
+local function report(message)
+    print("[SilentFilm Cadence] " .. tostring(message))
+    pcall(function() items.Status.Text = tostring(message) end)
+end
+local function guarded(action)
+    local ok, err = xpcall(action, function(err)
+        return debug and debug.traceback and debug.traceback(tostring(err), 2) or tostring(err)
+    end)
+    if not ok then report("ОШИБКА: " .. tostring(err)) end
+end
+local function numeric(id, low, high, integer)
+    local value = tonumber(items[id].Text)
+    assert(value and value == value and value >= low and value <= high and (not integer or value == math.floor(value)), "Некорректное значение: " .. id)
+    return value
+end
+local function chooseListSource()
+    local index = tonumber(items.SourceList.CurrentIndex) or 0
+    local entry = sourceEntries[index]
+    assert(entry, "Выбери файл в списке или введи его полный путь и нажми «Принять путь»")
+    local project = projectNow()
+    assert(entry.projectName == project:GetName(), "Проект изменился; нажми «Обновить список»")
+    assert(exists(entry.path), "Исходник недоступен: " .. entry.path)
+    sourceSnapshot = entry; chosenListIndex = index
+    items.SourcePath.Text = entry.path
+    report("Источник выбран: " .. entry.name .. ". Можно нажать «Рассчитать».")
+end
+local function chooseFileSource()
+    local path = items.SourcePath.Text
+    assert(path:sub(1,1) == "/" and exists(path), "Введи полный путь к доступному локальному видеофайлу")
+    local project = projectNow()
+    sourceSnapshot = {projectName=project:GetName(), path=path, name=path:match("[^/]+$") or path}
+    chosenListIndex = tonumber(items.SourceList.CurrentIndex) or 0
+    report("Источник по пути: " .. sourceSnapshot.name .. ". Будет пересчитан весь файл; In/Out Media Pool не применяются.")
+end
+local function refreshSources()
+    sourceSnapshot = nil; chosenListIndex = 0; sourceEntries = {}
+    updatingSources = true
+    items.SourceList:Clear(); items.SourceList:AddItem("— Выбери исходник текущей папки Media Pool —")
+    items.SourceList.CurrentIndex = 0; items.SourcePath.Text = ""
+    updatingSources = false
+    local project = projectNow()
+    local folder = project:GetMediaPool():GetCurrentFolder()
+    assert(folder, "Открой папку исходников в Media Pool или введи путь к файлу")
+    for _, clip in pairs(folder:GetClipList() or {}) do
+        local ok, path = pcall(function() return clip:GetClipProperty("File Path") end)
+        if ok and type(path) == "string" and path ~= "" and exists(path) then
+            sourceEntries[#sourceEntries+1] = {projectName=project:GetName(), clip=clip, path=path, name=clip:GetName() or path}
+        end
+    end
+    table.sort(sourceEntries, function(a,b) return a.name .. a.path < b.name .. b.path end)
+    updatingSources = true
+    for _, entry in ipairs(sourceEntries) do items.SourceList:AddItem(entry.name .. " — " .. entry.path) end
+    items.SourceList.CurrentIndex = 0
+    updatingSources = false
+    local timeline = project:GetCurrentTimeline()
+    local fps = timeline and timeline:GetSetting("timelineFrameRate") or project:GetSetting("timelineFrameRate")
+    if fps then items.OutputFps.Text = tostring(decimal(fps)) end
+    report("В текущей папке найдено файлов: " .. #sourceEntries .. ". Выбери нужный в списке или введи полный путь.")
+end
+function win.On.SourceButton.Clicked(ev) guarded(refreshSources) end
+function win.On.FileButton.Clicked(ev) guarded(chooseFileSource) end
+function win.On.SourceList.CurrentIndexChanged(ev)
+    if not updatingSources and (tonumber(items.SourceList.CurrentIndex) or 0) > 0 then guarded(chooseListSource) end
+end
+
+function win.On.Start.Clicked(ev)
+    guarded(function()
+        report("Нажата кнопка «Рассчитать». Проверка исходника и параметров…")
+        if activeJob then
+            local previous = readIni(activeJob .. "/status.ini")
+            assert(previous and (previous.state == "complete" or previous.state == "error" or previous.state == "cancelled"), "Предыдущее задание ещё выполняется; проверь его статус")
+        end
+        assert(exists(helper), "Сначала собери silentfilm_cadence: " .. helper)
+        local index = tonumber(items.SourceList.CurrentIndex) or 0
+        if index > 0 and (not sourceSnapshot or index ~= chosenListIndex) then chooseListSource() end
+        if not sourceSnapshot or items.SourcePath.Text ~= sourceSnapshot.path then chooseFileSource() end
+        local project = projectNow()
+        assert(sourceSnapshot and sourceSnapshot.projectName == project:GetName(), "Проект изменился; нажми «Обновить список»")
+        local clip, path = sourceSnapshot.clip, sourceSnapshot.path
+        assert(exists(path), "Исходник больше недоступен: " .. path)
+        local request = {
+            schema=1, input=path, output_fps=numeric("OutputFps",1,120),
+            format=items.Format.CurrentIndex == 0 and "prores" or "tiff",
+            device=items.Backend.CurrentIndex == 0 and "cuda" or "cpu",
+            input_transfer=({"srgb", "gamma24", "linear"})[items.Transfer.CurrentIndex + 1],
+            fps_min=numeric("Min",8,36), fps_max=numeric("Max",8,36), variation=numeric("Variation",0,1),
+            irregularity=numeric("Irregularity",0,1), seed=numeric("Seed",0,2147483647,true),
+            shutter=numeric("Shutter",0,1.5), motion_blur=numeric("Motion",0,2), samples=numeric("Samples",1,9,true),
+            exposure_link=numeric("Exposure",0,1), shake=numeric("Shake",0,1),
+            vignette=numeric("Vignette",0,1), edge_softness=numeric("EdgeSoft",0,1), softness=numeric("Softness",0,1),
+            edge_start=numeric("EdgeStart",0,4), edge_end=numeric("EdgeEnd",0.01,4),
+            focus_drift=numeric("Focus",0,0.5), focus_seed=numeric("FocusSeed",0,2147483647,true),
+        }
+        assert(request.fps_min <= request.fps_max and request.edge_start < request.edge_end, "Проверь границы FPS и Edge Start/End")
+        local clipFps = clip and clip:GetClipProperty("FPS") or nil
+        if clipFps and clipFps ~= "" then request.expected_source_fps = decimal(clipFps) end
+        local marks = clip and items.UseMarks.Checked and clip:GetMarkInOut() or nil
+        local video = marks and marks.video or nil
+        request.start_frame = video and tonumber(video["in"]) or 0
+        if video and video["out"] ~= nil then
+            request.frame_count = tonumber(video["out"]) - request.start_frame + 1
+            assert(request.frame_count > 0, "Out должен быть не раньше In")
+        end
+        local root = items.Root.Text
+        assert(root:sub(1,1) == "/", "Папка результата должна быть абсолютным Linux-путём")
+        report("Параметры приняты. Создание задания в " .. root)
+        assert(command("mkdir -p -- " .. quote(root)), "Не удалось создать папку результатов")
+        local pipe = assert(io.popen("mktemp -d -- " .. quote(root .. "/cadence_XXXXXXXX"), "r"))
+        local directory = pipe:read("*l"); pipe:close()
+        assert(directory and directory:sub(1,1) == "/", "Не удалось создать отдельную папку задания")
+        writeIni(directory .. "/request.ini", request)
+        writeIni(directory .. "/context.ini", {project_name=project:GetName(), source_name=sourceSnapshot.name, output_fps=request.output_fps})
+        items.Job.Text = directory
+        report("Задание записано: " .. directory .. ". Запуск нативного процесса…")
+        if command("mkdir -p -- " .. quote(defaultRoot)) then
+            pcall(writeIni, defaultRoot .. "/last_job.ini", {directory=directory})
+        end
+        -- Системные FFmpeg/libstdc++ helper не должны подменяться библиотеками из /opt/resolve/libs.
+        assert(command("env -u LD_LIBRARY_PATH -u LD_PRELOAD " .. quote(helper) .. " --job " .. quote(directory .. "/request.ini") .. " > " .. quote(directory .. "/render.log") .. " 2>&1 < /dev/null &"), "Не удалось запустить нативный процесс")
+        activeJob = directory; importedJob = nil; items.Job.Text = directory
+        report("Задание запущено. Нажимай «Проверить / импортировать». Лог: " .. directory .. "/render.log")
+    end)
+end
+
+local function importResult(directory, result)
+    assert(result.schema == "1" and result.state == "complete", "Результат не завершён")
+    local count, fps = tonumber(result.frame_count), tonumber(result.output_fps)
+    assert(count and count > 0 and count == math.floor(count) and fps and fps > 0, "Некорректный паспорт результата")
+    local project = projectNow()
+    local context = readIni(directory .. "/context.ini")
+    assert(not context or context.project_name == project:GetName(), "Открой исходный проект " .. tostring(context and context.project_name))
+    assert(importedJob ~= directory, "Это задание уже импортировано в этом окне")
+    local pool = project:GetMediaPool()
+    local imported
+    if result.format == "tiff" then
+        imported = pool:ImportMedia({{FilePath=result.media_path, StartIndex=0, EndIndex=count-1}})
+    else
+        assert(exists(result.media_path), "Файл результата отсутствует")
+        imported = pool:ImportMedia({result.media_path})
+    end
+    assert(imported and imported[1], "Resolve не импортировал результат; проверь render.log и поддержку формата")
+    if result.format == "tiff" then
+        assert(#imported == 1, "Отключи Show Individual Frames в Media Pool и повтори импорт TIFF как последовательности")
+    end
+    local clip = imported[1]
+    local fpsText = tostring(context and context.output_fps or fps)
+    clip:SetClipProperty("FPS", fpsText)
+    assert(math.abs(decimal(clip:GetClipProperty("FPS")) - fps) < 0.002, "Resolve не назначил результату нужный FPS; импорт оставлен в Media Pool")
+    report(string.format("Подготовленный клип: паспорт %d кадров при %.6g fps; Media Pool FPS=%s, Frames=%s, Duration=%s; Project FPS=%s",
+        count, fps, tostring(clip:GetClipProperty("FPS")), tostring(clip:GetClipProperty("Frames")),
+        tostring(clip:GetClipProperty("Duration")), tostring(project:GetSetting("timelineFrameRate"))))
+    local oldTimeline = project:GetCurrentTimeline()
+    local name = "SilentFilm Cadence — " .. (context and context.source_name or "Result") .. " — " .. os.date("%H%M%S")
+    local timeline = assert(pool:CreateEmptyTimeline(name), "Не удалось создать новый таймлайн")
+    local ok, err = pcall(function()
+        timeline:SetSetting("useCustomSettings", "1")
+        timeline:SetSetting("timelineFrameRate", fpsText)
+        assert(math.abs(decimal(timeline:GetSetting("timelineFrameRate")) - fps) < 0.002, "FPS нового таймлайна не совпал с FPS результата")
+        assert(project:SetCurrentTimeline(timeline), "Не удалось выбрать новый таймлайн")
+        -- Вывод уже содержит ровно M кадров и не имеет аудио. Добавляем весь файл:
+        -- ручной startFrame/endFrame здесь лишний и зависит от интерпретации FPS SDK.
+        pcall(function() clip:ClearMarkInOut("all") end)
+        local added = pool:AppendToTimeline({clip})
+        assert(added and added[1], "Не удалось добавить подготовленный клип")
+        local duration = tonumber(added[1]:GetDuration())
+        local startFrame, endFrame = added[1]:GetStart(), added[1]:GetEnd()
+        report(string.format("Добавлен весь клип: Timeline FPS=%s, duration=%s, start=%s, end=%s, ожидается=%d",
+            tostring(timeline:GetSetting("timelineFrameRate")), tostring(duration), tostring(startFrame), tostring(endFrame), count))
+        assert(duration and math.abs(duration - count) < 0.01,
+            string.format("Длительность клипа: Resolve=%s, ожидается=%d кадров. См. FPS/Frames в Console", tostring(duration), count))
+    end)
+    if not ok then
+        if oldTimeline then project:SetCurrentTimeline(oldTimeline) end
+        pool:DeleteTimelines({timeline})
+        error(tostring(err) .. ". Подготовленный файл и Media Pool clip сохранены.")
+    end
+    importedJob = directory
+    report(string.format("Импортировано: %d кадров, %.3f с при %.6g fps. Новый таймлайн: %s. Добавляй Negative → Print → Projector; повторная Camera не нужна.", count, count/fps, fps, name))
+end
+
+function win.On.Refresh.Clicked(ev)
+    guarded(function()
+        local directory = items.Job.Text
+        assert(directory ~= "", "Нет задания для проверки")
+        local result = readIni(directory .. "/result.ini")
+        if result then importResult(directory, result); return end
+        local status = readIni(directory .. "/status.ini")
+        if not status then report("Статуса пока нет. Если процесс не стартовал, открой " .. directory .. "/render.log"); return end
+        local progress = ""
+        local position, total = tonumber(status.source_position), tonumber(status.source_duration_hint)
+        if position and total and total > 0 then progress = string.format(" (%.1f%% исходника)", math.min(100, 100*position/total)) end
+        report((status.message or status.state) .. "; кадров: " .. (status.frames_written or "0") .. progress .. ". Лог: " .. directory .. "/render.log")
+    end)
+end
+function win.On.Cancel.Clicked(ev)
+    guarded(function()
+        local directory = items.Job.Text
+        assert(directory ~= "" and not exists(directory .. "/result.ini"), "Нет активного незавершённого задания")
+        local f = assert(io.open(directory .. "/cancel.request", "wb")); f:write("cancel\n"); f:close()
+        report("Запрошена остановка. Проверь статус; частичный результат не импортируется.")
+    end)
+end
+function win.On.CadenceWindow.Close(ev) disp:ExitLoop() end
+local previous = readIni(defaultRoot .. "/last_job.ini")
+if previous then items.Job.Text = previous.directory or "" end
+guarded(refreshSources)
+win:Show(); disp:RunLoop(); win:Hide()

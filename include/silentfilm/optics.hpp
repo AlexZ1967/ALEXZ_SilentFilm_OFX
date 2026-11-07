@@ -11,6 +11,9 @@ struct CameraOpticsParameters {
     float edgeSoftness = 0;
     float edgeStart = 0.6f;
     float edgeEnd = 1.0f;
+    float softness = 0;
+    float focusDrift = 0;
+    float focusSignal = 0;
     bool sourcePremultiplied = false;
     bool outputPremultiplied = false;
 };
@@ -22,6 +25,9 @@ using AbortCallback = bool (*)(void* context);
 namespace optics {
 
 /** Compute a circular mask using half the image width as the unit radius. */
+#if defined(__CUDACC__)
+__host__ __device__
+#endif
 inline float lensEdgeMask(int x, int y, int x1, int y1, int x2, int y2,
     const CameraOpticsParameters& parameters) noexcept
 {
@@ -44,6 +50,6 @@ inline float lensEdgeMask(int x, int y, int x1, int y1, int x2, int y2,
 
 /** Apply monochrome capture optics, variable edge blur, vignette and alpha conversion. */
 bool renderCameraCpu(ImageView source, ImageView output, RenderWindow window,
-    const CameraOpticsParameters& parameters, AbortCallback abort, void* context);
+    const CameraOpticsParameters& parameters, float exposureGain, AbortCallback abort, void* context);
 
 } // namespace silentfilm

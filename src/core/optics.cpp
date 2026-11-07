@@ -1,8 +1,10 @@
 #include "silentfilm/optics.hpp"
 #include "silentfilm/cuda_backend.hpp"
 #include "silentfilm/probe.hpp"
+#include "silentfilm/sensitometry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -18,6 +20,10 @@ bool cancelled(AbortCallback abort, void* context)
     return abort && abort(context);
 }
 
+bool gaussianBlur(const Plane& source, int width, int height, float sigma,
+    Plane& output, AbortCallback abort, void* context);
+float levelWeight(const std::vector<float>& levels, std::size_t index, float sigma);
+
 Pixel readPixel(ImageView image, int x, int y)
 {
     if (x < image.x1 || y < image.y1 || x >= image.x2 || y >= image.y2) return {};
@@ -28,15 +34,64 @@ Pixel readPixel(ImageView image, int x, int y)
     return pixel;
 }
 
-float luma(Pixel pixel, bool premultiplied)
+Plane processCameraPlane(Plane signal, int width, int height, const Plane& edgeMask,
+    const CameraOpticsParameters& parameters, AbortCallback abort, void* context)
 {
-    if (premultiplied) {
-        if (pixel.a <= 0) return 0;
-        pixel.r /= pixel.a;
-        pixel.g /= pixel.a;
-        pixel.b /= pixel.a;
+    const auto pixelCount = signal.size();
+    Plane accumulated(pixelCount, 0.0f);
+    const float edgeMaximumSigma = static_cast<float>(width) / 40.0f * parameters.edgeSoftness;
+    std::vector<float> edgeLevels{0.0f};
+    if (edgeMaximumSigma > 0) {
+        float sigma = std::min(0.5f, edgeMaximumSigma);
+        while (sigma < edgeMaximumSigma) { edgeLevels.push_back(sigma); sigma *= 2.0f; }
+        edgeLevels.push_back(edgeMaximumSigma);
     }
-    return pixel.r * 0.299f + pixel.g * 0.587f + pixel.b * 0.114f;
+
+    for (std::size_t level = 0; level < edgeLevels.size(); ++level) {
+        Plane blurred;
+        if (level == 0) blurred = signal;
+        else if (!gaussianBlur(signal, width, height, edgeLevels[level], blurred, abort, context)) return {};
+        for (int y = 0; y < height; ++y) {
+            if (cancelled(abort, context)) return {};
+            for (int x = 0; x < width; ++x) {
+                const auto index = static_cast<std::size_t>(y) * width + x;
+                const float weight = levelWeight(edgeLevels, level, edgeMask[index] * edgeMaximumSigma);
+                accumulated[index] += blurred[index] * weight;
+            }
+        }
+    }
+    if (parameters.vignetteStrength > 0) {
+        for (std::size_t index = 0; index < pixelCount; ++index)
+            accumulated[index] *= 1.0f - edgeMask[index] * parameters.vignetteStrength;
+    }
+    if (parameters.softness > 0) {
+        Plane softened;
+        const float sigma = std::max(0.1f, static_cast<float>(width) / 1920.0f * parameters.softness * 4.0f);
+        if (!gaussianBlur(accumulated, width, height, sigma, softened, abort, context)) return {};
+        accumulated = std::move(softened);
+    }
+    if (parameters.focusDrift > 0) {
+        const float focusMask = std::clamp((parameters.focusSignal + 1.0f) * 0.5f, 0.0f, 1.0f);
+        const float maximumSigma = static_cast<float>(width) / 1920.0f * parameters.focusDrift * 8.0f;
+        const float sigmaTarget = maximumSigma * focusMask;
+        if (sigmaTarget > 0.0f && maximumSigma > 0.0f) {
+            std::vector<float> levels{0.0f};
+            float sigma = std::min(0.5f, maximumSigma);
+            while (sigma < maximumSigma) { levels.push_back(sigma); sigma *= 2.0f; }
+            levels.push_back(maximumSigma);
+            Plane focused(pixelCount, 0.0f);
+            for (std::size_t level = 0; level < levels.size(); ++level) {
+                const float weight = levelWeight(levels, level, sigmaTarget);
+                if (weight == 0.0f) continue;
+                Plane blurred;
+                if (level == 0) blurred = accumulated;
+                else if (!gaussianBlur(accumulated, width, height, levels[level], blurred, abort, context)) return {};
+                for (std::size_t i = 0; i < pixelCount; ++i) focused[i] += blurred[i] * weight;
+            }
+            accumulated = std::move(focused);
+        }
+    }
+    return accumulated;
 }
 
 int borderIndex(int index, int length, bool reflect)
@@ -177,48 +232,39 @@ float levelWeight(const std::vector<float>& levels, std::size_t index, float sig
 } // namespace
 
 bool renderCameraCpu(ImageView source, ImageView output, RenderWindow window,
-    const CameraOpticsParameters& parameters, AbortCallback abort, void* context)
+    const CameraOpticsParameters& parameters, float exposureGain, AbortCallback abort, void* context)
 {
     const int width = source.x2 - source.x1;
     const int height = source.y2 - source.y1;
     if (width <= 0 || height <= 0) return true;
     const auto pixelCount = static_cast<std::size_t>(width) * height;
-    Plane gray(pixelCount);
+    std::array<Plane, 3> channels{Plane(pixelCount), Plane(pixelCount), Plane(pixelCount)};
     for (int y = 0; y < height; ++y) {
         if (cancelled(abort, context)) return false;
         for (int x = 0; x < width; ++x) {
-            gray[static_cast<std::size_t>(y) * width + x] = luma(readPixel(source, source.x1 + x, source.y1 + y), parameters.sourcePremultiplied);
+            auto pixel = readPixel(source, source.x1 + x, source.y1 + y);
+            if (parameters.sourcePremultiplied) {
+                if (pixel.a <= 0) pixel.r = pixel.g = pixel.b = 0;
+                else { pixel.r /= pixel.a; pixel.g /= pixel.a; pixel.b /= pixel.a; }
+            }
+            const auto index = static_cast<std::size_t>(y) * width + x;
+            channels[0][index] = pixel.r; channels[1][index] = pixel.g; channels[2][index] = pixel.b;
         }
     }
-
-    Plane accumulated(pixelCount, 0.0f);
-    const float maximumSigma = static_cast<float>(width) / 40.0f * parameters.edgeSoftness;
-    std::vector<float> levels{0.0f};
-    if (maximumSigma > 0) {
-        float sigma = std::min(0.5f, maximumSigma);
-        while (sigma < maximumSigma) {
-            levels.push_back(sigma);
-            sigma *= 2.0f;
-        }
-        levels.push_back(maximumSigma);
-    }
-
-    for (std::size_t level = 0; level < levels.size(); ++level) {
-        Plane blurred;
-        if (level == 0) blurred = gray;
-        else if (!gaussianBlur(gray, width, height, levels[level], blurred, abort, context)) return false;
+    Plane edgeMask(pixelCount, 0.0f);
+    if (parameters.vignetteStrength > 0 || parameters.edgeSoftness > 0) {
         for (int y = 0; y < height; ++y) {
             if (cancelled(abort, context)) return false;
-            const int absoluteY = source.y1 + y;
             for (int x = 0; x < width; ++x) {
-                const int absoluteX = source.x1 + x;
-                const float mask = optics::lensEdgeMask(absoluteX, absoluteY,
-                    source.x1, source.y1, source.x2, source.y2, parameters);
-                const float weight = levelWeight(levels, level, mask * maximumSigma);
-                const auto index = static_cast<std::size_t>(y) * width + x;
-                accumulated[index] += blurred[index] * weight;
+                edgeMask[static_cast<std::size_t>(y) * width + x] = optics::lensEdgeMask(
+                    source.x1 + x, source.y1 + y, source.x1, source.y1, source.x2, source.y2, parameters);
             }
         }
+    }
+    for (auto& channel : channels) {
+        channel = processCameraPlane(std::move(channel), width, height, edgeMask,
+            parameters, abort, context);
+        if (channel.size() != pixelCount) return false;
     }
 
     const int xBegin = std::max(window.x1, output.x1);
@@ -232,8 +278,14 @@ bool renderCameraCpu(ImageView source, ImageView output, RenderWindow window,
             const auto input = readPixel(source, x, y);
             if (x >= source.x1 && y >= source.y1 && x < source.x2 && y < source.y2) {
                 const auto index = static_cast<std::size_t>(y - source.y1) * width + (x - source.x1);
-                const float mask = optics::lensEdgeMask(x, y, source.x1, source.y1, source.x2, source.y2, parameters);
-                float value = accumulated[index] * (1.0f - mask * parameters.vignetteStrength);
+                const auto encodeExposure = [exposureGain](float value) {
+                    const float linear = std::clamp(film::decode(value, Transfer::SRGB) * exposureGain, 0.0f, 1.0f);
+                    return film::encode(linear, Transfer::SRGB);
+                };
+                const float red = encodeExposure(channels[0][index]);
+                const float green = encodeExposure(channels[1][index]);
+                const float blue = encodeExposure(channels[2][index]);
+                float value = red * 0.299f + green * 0.587f + blue * 0.114f;
                 if (parameters.outputPremultiplied) value *= input.a;
                 result = {value, value, value, input.a};
             }

@@ -5,3 +5,4 @@
 *.ofx.bundle/
 *.log
 /*.code-workspace
+/renders/cadence/

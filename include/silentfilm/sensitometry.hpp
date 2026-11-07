@@ -29,6 +29,8 @@ struct EmulsionParameters {
     bool outputPremultiplied = false;
     float grainStrength = 0;
     float grainSize = 1;
+    float halationStrength = 0;
+    float halationSize = 0.15f;
     std::uint32_t grainSeed = 0;
     std::uint32_t grainFrame = 0;
     float shadowCurveScale = 1;
