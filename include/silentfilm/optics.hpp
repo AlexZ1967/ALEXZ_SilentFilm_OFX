@@ -16,6 +16,8 @@ struct CameraOpticsParameters {
     float focusSignal = 0;
     bool sourcePremultiplied = false;
     bool outputPremultiplied = false;
+    // Промежуточный RGB после выдержки, до оптики/экспозиции/монохрома.
+    bool captureOnly = false;
 };
 
 struct ImageView;

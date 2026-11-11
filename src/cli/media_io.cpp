@@ -48,12 +48,14 @@ void put16(std::ostream& out, std::uint16_t value)
 }
 void put32(std::ostream& out, std::uint32_t value) { put16(out, static_cast<std::uint16_t>(value)); put16(out, static_cast<std::uint16_t>(value >> 16)); }
 
-void tiff(const std::filesystem::path& path, int width, int height, const std::vector<std::uint16_t>& data)
+void tiff(const std::filesystem::path& path, int width, int height, const std::vector<std::uint16_t>& data, PixelAspectRatio aspect)
 {
     const auto bytes = static_cast<std::uint64_t>(width) * height * 8;
-    constexpr std::uint16_t entries = 12;
+    constexpr std::uint16_t entries = 15;
     constexpr std::uint32_t bitsOffset = 8 + 2 + entries * 12 + 4;
-    constexpr std::uint32_t dataOffset = bitsOffset + 8;
+    constexpr std::uint32_t xResolutionOffset = bitsOffset + 8;
+    constexpr std::uint32_t yResolutionOffset = xResolutionOffset + 8;
+    constexpr std::uint32_t dataOffset = yResolutionOffset + 8;
     if (bytes > std::numeric_limits<std::uint32_t>::max() - dataOffset) throw std::runtime_error("Frame exceeds classic TIFF size limit");
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.exceptions(std::ios::badbit | std::ios::failbit);
@@ -64,9 +66,12 @@ void tiff(const std::filesystem::path& path, int width, int height, const std::v
     tag(256, 4, 1, width); tag(257, 4, 1, height); tag(258, 3, 4, bitsOffset);
     tag(259, 3, 1, 1); tag(262, 3, 1, 2); tag(273, 4, 1, dataOffset);
     tag(274, 3, 1, 1); tag(277, 3, 1, 4); tag(278, 4, 1, height);
-    tag(279, 4, 1, static_cast<std::uint32_t>(bytes)); tag(284, 3, 1, 1); tag(338, 3, 1, 2);
+    tag(279, 4, 1, static_cast<std::uint32_t>(bytes)); tag(282, 5, 1, xResolutionOffset);
+    tag(283, 5, 1, yResolutionOffset); tag(284, 3, 1, 1); tag(296, 3, 1, 1); tag(338, 3, 1, 2);
     put32(out, 0);
     for (int c = 0; c < 4; ++c) put16(out, 16);
+    put32(out, static_cast<std::uint32_t>(aspect.denominator)); put32(out, 1);
+    put32(out, static_cast<std::uint32_t>(aspect.numerator)); put32(out, 1);
     // TIFF little-endian, независимо от порядка байтов машины.
     std::vector<char> packed(data.size() * 2);
     for (std::size_t i = 0; i < data.size(); ++i) {
@@ -90,6 +95,8 @@ struct VideoReader::Impl {
     double fps = 0;
     std::int64_t nextIndex = 0, firstPts = AV_NOPTS_VALUE;
     bool draining = false, ended = false;
+    bool decodedAlpha = false;
+    AVRational sampleAspect{0, 1};
     Transfer inputTransfer = Transfer::SRGB;
     std::size_t budget = 0, rawBytes = 0;
     std::function<bool()> cancelled;
@@ -137,9 +144,8 @@ struct VideoReader::Impl {
         fps = av_q2d(rate);
         if (width <= 0 || height <= 0 || width > 32768 || height > 32768 || !std::isfinite(fps) || fps <= 0 || fps > 1000)
             throw std::runtime_error("Unsupported source dimensions or missing constant frame rate");
-        if (codec->sample_aspect_ratio.num > 0 && codec->sample_aspect_ratio.den > 0
-            && codec->sample_aspect_ratio.num != codec->sample_aspect_ratio.den)
-            throw std::runtime_error("Non-square source pixels require a square-pixel intermediate from Resolve");
+        sampleAspect = av_guess_sample_aspect_ratio(format, stream, nullptr);
+        if (sampleAspect.num <= 0 || sampleAspect.den <= 0) sampleAspect = codec->sample_aspect_ratio;
         packet = av_packet_alloc(); if (!packet) throw std::bad_alloc();
         rgba.resize(static_cast<std::size_t>(width) * height * 4);
     }
@@ -150,6 +156,14 @@ struct VideoReader::Impl {
             const int result = avcodec_receive_frame(codec, decoded.get());
             if (result == AVERROR_EOF) { ended = true; return false; }
             if (result >= 0) {
+                const auto* pixelFormat = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(decoded->format));
+                decodedAlpha = pixelFormat && (pixelFormat->flags & AV_PIX_FMT_FLAG_ALPHA);
+                const AVRational frameAspect = av_guess_sample_aspect_ratio(format, stream, decoded.get());
+                if (frameAspect.num > 0 && frameAspect.den > 0) {
+                    if (nextIndex > 0 && sampleAspect.num > 0 && sampleAspect.den > 0 && av_cmp_q(sampleAspect, frameAspect) != 0)
+                        throw std::runtime_error("Source pixel aspect ratio changes within the clip");
+                    sampleAspect = frameAspect;
+                }
                 if (decoded->width != width || decoded->height != height) throw std::runtime_error("Source resolution changes within the clip");
                 if (decoded->color_trc == AVCOL_TRC_SMPTE2084 || decoded->color_trc == AVCOL_TRC_ARIB_STD_B67)
                     throw std::runtime_error("HDR PQ/HLG is unsupported; prepare SDR Rec.709 input in Resolve");
@@ -237,6 +251,11 @@ VideoReader::~VideoReader() = default;
 int VideoReader::width() const { return impl_->width; }
 int VideoReader::height() const { return impl_->height; }
 double VideoReader::fps() const { return impl_->fps; }
+PixelAspectRatio VideoReader::pixelAspectRatio() const {
+    const auto aspect = impl_->sampleAspect;
+    return aspect.num > 0 && aspect.den > 0 ? PixelAspectRatio{aspect.num, aspect.den} : PixelAspectRatio{};
+}
+bool VideoReader::hasAlphaChannel() const { return impl_->decodedAlpha; }
 std::int64_t VideoReader::frameCountHint() const { return impl_->stream->nb_frames; }
 std::int64_t VideoReader::decodedCount() const { return impl_->nextIndex; }
 bool VideoReader::eof() const { return impl_->ended; }
@@ -246,7 +265,9 @@ std::shared_ptr<const SourceFrame> VideoReader::get(std::int64_t index) { return
 struct FrameWriter::Impl {
     std::filesystem::path directory, path;
     std::string format;
+    std::string movieName = "cadence", tiffPrefix = "frame_";
     int width = 0, height = 0;
+    PixelAspectRatio aspect;
     bool finished = false;
     std::vector<std::uint16_t> rgba;
     AVFormatContext* container = nullptr;
@@ -269,20 +290,21 @@ struct FrameWriter::Impl {
             check(av_interleaved_write_frame(container, packet), "Write ProRes packet"); av_packet_unref(packet);
         }
     }
-    void open(double fps) {
+    void open(double fps, PixelAspectRatio aspect) {
         rgba.resize(static_cast<std::size_t>(width) * height * 4);
         if (format == "tiff") {
             if (!std::filesystem::create_directory(directory / "frames")) throw std::runtime_error("Output frames directory already exists");
-            path = directory / "frames" / "frame_%08d.tif"; return;
+            path = directory / "frames" / (tiffPrefix + "%08d.tif"); return;
         }
         if (format != "prores") throw std::runtime_error("Output format must be prores or tiff");
-        path = directory / "cadence.mov";
+        path = directory / (movieName + ".mov");
         if (std::filesystem::exists(path)) throw std::runtime_error("Output movie already exists");
         check(avformat_alloc_output_context2(&container, nullptr, "mov", path.c_str()), "Create MOV output");
         const auto* encoder = avcodec_find_encoder_by_name("prores_ks");
         if (!encoder) throw std::runtime_error("FFmpeg prores_ks encoder is unavailable; select TIFF output");
         codec = avcodec_alloc_context3(encoder); if (!codec) throw std::bad_alloc();
         codec->width = width; codec->height = height; codec->pix_fmt = AV_PIX_FMT_YUVA444P10LE;
+        codec->sample_aspect_ratio = AVRational{aspect.numerator, aspect.denominator};
         codec->framerate = av_d2q(fps, 1001000); codec->time_base = av_inv_q(codec->framerate);
         codec->color_primaries = AVCOL_PRI_BT709; codec->color_trc = AVCOL_TRC_IEC61966_2_1;
         codec->colorspace = AVCOL_SPC_BT709; codec->color_range = AVCOL_RANGE_MPEG;
@@ -292,11 +314,13 @@ struct FrameWriter::Impl {
         check(av_opt_set_int(codec->priv_data, "profile", 4, 0), "Set ProRes 4444 profile");
         check(avcodec_open2(codec, encoder, nullptr), "Open ProRes encoder");
         stream = avformat_new_stream(container, nullptr); if (!stream) throw std::bad_alloc();
+        stream->sample_aspect_ratio = codec->sample_aspect_ratio;
         check(avcodec_parameters_from_context(stream->codecpar, codec), "Set MOV video parameters");
         stream->time_base = codec->time_base; stream->avg_frame_rate = codec->framerate;
         check(avio_open(&container->pb, path.c_str(), AVIO_FLAG_WRITE), "Open MOV output");
         check(avformat_write_header(container, nullptr), "Write MOV header");
         encoded->format = codec->pix_fmt; encoded->width = width; encoded->height = height;
+        encoded->sample_aspect_ratio = codec->sample_aspect_ratio;
         encoded->color_primaries = codec->color_primaries; encoded->color_trc = codec->color_trc;
         encoded->colorspace = codec->colorspace; encoded->color_range = codec->color_range;
         check(av_frame_get_buffer(encoded.get(), 32), "Allocate ProRes image");
@@ -309,9 +333,20 @@ struct FrameWriter::Impl {
     }
 };
 
-FrameWriter::FrameWriter(const std::filesystem::path& directory, const std::string& format, int width, int height, double fps)
+FrameWriter::FrameWriter(const std::filesystem::path& directory, const std::string& format, int width, int height, double fps,
+    const std::string& outputName, PixelAspectRatio aspect)
     : impl_(std::make_unique<Impl>()) {
-    impl_->directory = directory; impl_->format = format; impl_->width = width; impl_->height = height; impl_->open(fps);
+    if (!outputName.empty()) {
+        if (outputName == "." || outputName == ".." || outputName.size() > 220
+            || outputName.find_first_of("/\\%\r\n") != std::string::npos
+            || std::any_of(outputName.begin(), outputName.end(), [](unsigned char value) { return value < 32 || value == 127; }))
+            throw std::runtime_error("Invalid output basename");
+        impl_->movieName = outputName;
+        impl_->tiffPrefix = outputName + "_";
+    }
+    if (aspect.numerator <= 0 || aspect.denominator <= 0) throw std::runtime_error("Invalid pixel aspect ratio");
+    impl_->aspect = aspect;
+    impl_->directory = directory; impl_->format = format; impl_->width = width; impl_->height = height; impl_->open(fps, aspect);
 }
 FrameWriter::~FrameWriter() = default;
 void FrameWriter::write(const std::vector<Pixel>& pixels, std::int64_t index)
@@ -323,8 +358,8 @@ void FrameWriter::write(const std::vector<Pixel>& pixels, std::int64_t index)
         p.rgba[4 * i + 2] = word(pixels[i].b); p.rgba[4 * i + 3] = word(pixels[i].a);
     }
     if (p.format == "tiff") {
-        std::ostringstream name; name << "frame_" << std::setw(8) << std::setfill('0') << index << ".tif";
-        tiff(p.directory / "frames" / name.str(), p.width, p.height, p.rgba); return;
+        std::ostringstream name; name << p.tiffPrefix << std::setw(8) << std::setfill('0') << index << ".tif";
+        tiff(p.directory / "frames" / name.str(), p.width, p.height, p.rgba, p.aspect); return;
     }
     check(av_frame_make_writable(p.encoded.get()), "Reuse ProRes image");
     const std::uint8_t* planes[4]{reinterpret_cast<const std::uint8_t*>(p.rgba.data()), nullptr, nullptr, nullptr};

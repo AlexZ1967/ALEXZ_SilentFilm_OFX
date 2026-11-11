@@ -12,7 +12,7 @@ struct CadenceSettings {
     double shutterFraction = 0.65, motionBlurStrength = 0.8, exposureVariation = 1;
     float shake = 0.25f;
     std::uint32_t focusSeed = 1925;
-    int exposureSamples = 5;
+    int exposureSamples = 9;
 };
 
 struct CaptureExposurePlan {
@@ -21,8 +21,8 @@ struct CaptureExposurePlan {
     double exposureFrames = 0;
     float gain = 1;
     int count = 1;
-    std::array<double, 9> positions{};
-    std::array<float, 9> weights{};
+    std::array<double, maximumCameraExposureSamples> positions{};
+    std::array<float, maximumCameraExposureSamples> weights{};
 };
 
 /** Build one physical exposure in source-frame coordinates, independent of playback FPS. */

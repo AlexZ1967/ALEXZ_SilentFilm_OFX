@@ -1,6 +1,7 @@
 #include "silentfilm/camera_capture.hpp"
 
 #include "silentfilm/probe.hpp"
+#include "silentfilm/sensitometry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -311,6 +312,31 @@ bool renderCameraCaptureCpu(const CameraExposureSample* samples, int sampleCount
     const ImageView merged{reinterpret_cast<unsigned char*>(combined.data()),
         static_cast<std::ptrdiff_t>(width) * static_cast<std::ptrdiff_t>(sizeof(Pixel)),
         bounds.x1, bounds.y1, bounds.x2, bounds.y2};
+    if (parameters.captureOnly) {
+        for (int y = std::max(window.y1, output.y1); y < std::min(window.y2, output.y2); ++y) {
+            if (abort && abort(context)) return false;
+            for (int x = std::max(window.x1, output.x1); x < std::min(window.x2, output.x2); ++x) {
+                // За пределами захваченного кадра нужен прозрачный ноль.
+                // readPixel используется sampler-ом и продлевает край изображения.
+                auto pixel = x >= bounds.x1 && x < bounds.x2 && y >= bounds.y1 && y < bounds.y2
+                    ? readPixel(merged, x, y) : Pixel{};
+                const auto applyExposure = [exposureGain](float value) {
+                    return film::encode(std::clamp(film::decode(value, Transfer::SRGB) * exposureGain,
+                        0.0f, 1.0f), Transfer::SRGB);
+                };
+                pixel.r = applyExposure(pixel.r);
+                pixel.g = applyExposure(pixel.g);
+                pixel.b = applyExposure(pixel.b);
+                if (parameters.outputPremultiplied) {
+                    pixel.r *= pixel.a; pixel.g *= pixel.a; pixel.b *= pixel.a;
+                }
+                auto* destination = output.data + (static_cast<std::ptrdiff_t>(y) - output.y1) * output.rowBytes
+                    + (static_cast<std::ptrdiff_t>(x) - output.x1) * sizeof(Pixel);
+                std::memcpy(destination, &pixel, sizeof(pixel));
+            }
+        }
+        return true;
+    }
     auto cameraParameters = parameters;
     cameraParameters.sourcePremultiplied = false;
     return renderCameraCpu(merged, output, window, cameraParameters, exposureGain, abort, context);

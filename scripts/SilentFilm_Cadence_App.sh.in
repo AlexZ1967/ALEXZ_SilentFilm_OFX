@@ -1,0 +1,7 @@
+#!/bin/sh
+# Системный Python нужен только для отдельного окна; OFX и native render его не загружают.
+exec env -u LD_LIBRARY_PATH -u LD_PRELOAD -u PYTHONHOME -u PYTHONPATH /usr/bin/python3 \
+    "@CMAKE_CURRENT_SOURCE_DIR@/scripts/cadence_app.py" \
+    --helper "@CMAKE_BINARY_DIR@/bin/silentfilm_cadence" \
+    --root "@CMAKE_CURRENT_SOURCE_DIR@/renders/cadence" \
+    --backend "@SILENTFILM_CADENCE_DEFAULT_BACKEND@" "$@"

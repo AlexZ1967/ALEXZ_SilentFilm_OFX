@@ -9,7 +9,7 @@ namespace silentfilm {
 CaptureExposurePlan planCaptureExposure(CaptureInterval interval, double sourceFps, const CadenceSettings& s)
 {
     if (!std::isfinite(sourceFps) || sourceFps <= 0 || interval.end <= interval.start || interval.fps <= 0
-        || s.exposureSamples < 1 || s.exposureSamples > 9)
+        || s.exposureSamples < 1 || s.exposureSamples > maximumCameraExposureSamples)
         throw std::invalid_argument("Invalid physical capture exposure");
     CaptureExposurePlan plan;
     plan.interval = interval;

@@ -53,6 +53,7 @@ void runCase(int width, int height, int mode, bool hostStream)
     Image output(width + 6, height + 4, -5, 2, !reverse);
     auto expected = output.pixels;
     silentfilm::CameraOpticsParameters optics;
+    optics.captureOnly = mode >= 7;
     optics.sourcePremultiplied = mode % 3 == 0;
     optics.outputPremultiplied = mode % 2 == 0;
     optics.edgeStart = 0.25f; optics.edgeEnd = 0.95f;
@@ -78,14 +79,14 @@ void runCase(int width, int height, int mode, bool hostStream)
     if (hostStream) requireCuda(cudaStreamCreate(&stream));
     try {
         first.upload(stream); second.upload(stream); output.upload(stream);
-        std::array<silentfilm::CameraExposureSample, 9> cpu{}, gpu{};
-        std::array<silentfilm::CameraSampleTransform, 9> transforms{};
-        const int sampleCount = mode == 0 ? 1 : 9;
+        std::array<silentfilm::CameraExposureSample, silentfilm::maximumCameraExposureSamples> cpu{}, gpu{};
+        std::array<silentfilm::CameraSampleTransform, silentfilm::maximumCameraExposureSamples> transforms{};
+        const int sampleCount = mode == 0 ? 1 : mode >= 7 ? 17 : 9;
         const float shake = mode == 0 ? 0 : 0.37f;
         for (int i = 0; i < sampleCount; ++i) {
             const float phase = 12.1f + i * 0.013f;
-            const float mix = i % 3 == 0 ? 0 : static_cast<float>(i) / 9;
-            const float weight = std::max(1e-4f, 1 - std::abs(static_cast<float>(i) / 8 - 0.5f) * 2);
+            const float mix = i % 3 == 0 ? 0 : static_cast<float>(i) / sampleCount;
+            const float weight = sampleCount == 1 ? 1 : std::max(1e-4f, 1 - std::abs(static_cast<float>(i) / (sampleCount - 1) - 0.5f) * 2);
             cpu[i] = {first.view(), phase, second.view(), mix, weight};
             gpu[i] = {first.view(true), phase, second.view(true), mix, weight};
             transforms[i] = silentfilm::cameraSampleTransform(phase, shake, 1925, width, height);
@@ -136,7 +137,7 @@ int main()
         }
         requireCuda(status);
         for (bool hostStream : {false, true}) {
-            for (int mode = 0; mode <= 6; ++mode) {
+            for (int mode = 0; mode <= 8; ++mode) {
                 runCase(7, 5, mode, hostStream);
                 runCase(257, 43, mode, hostStream);
             }

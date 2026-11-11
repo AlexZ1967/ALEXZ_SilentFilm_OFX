@@ -10,7 +10,7 @@
 namespace silentfilm {
 namespace {
 
-constexpr int maximumSamples = 9;
+constexpr int maximumSamples = maximumCameraExposureSamples;
 
 struct CapturePacket {
     ImageView images[maximumSamples];
@@ -255,6 +255,14 @@ __global__ void directKernel(CapturePacket packet, ImageView output, RenderWindo
     Pixel result{};
     if (x >= bounds.x1 && x < bounds.x2 && y >= bounds.y1 && y < bounds.y2) {
         const auto rgb = captureValue(packet, x - bounds.x1, y - bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
+        if (parameters.captureOnly) {
+            result = {expose(rgb.r, gain), expose(rgb.g, gain), expose(rgb.b, gain), rgb.a};
+            if (parameters.outputPremultiplied) {
+                result.r *= result.a; result.g *= result.a; result.b *= result.a;
+            }
+            *address(output, x, y) = result;
+            return;
+        }
         const float mask = parameters.vignetteStrength > 0
             ? optics::lensEdgeMask(x, y, bounds.x1, bounds.y1, bounds.x2, bounds.y2, parameters) : 0;
         const float falloff = 1 - mask * parameters.vignetteStrength;
@@ -360,7 +368,7 @@ CudaStatus renderCudaCamera(const CameraExposureSample* samples, const CameraSam
     const float focusMaximum = static_cast<float>(width) / 1920.0f * parameters.focusDrift * 8.0f;
     const float focusTarget = focusMaximum * std::clamp((parameters.focusSignal + 1) * 0.5f, 0.0f, 1.0f);
     const bool focusActive = parameters.focusDrift > 0 && focusTarget > 0;
-    if (edgeMaximum <= 0 && parameters.softness <= 0 && !focusActive) {
+    if (parameters.captureOnly || (edgeMaximum <= 0 && parameters.softness <= 0 && !focusActive)) {
         directKernel<<<grid(window.x2 - window.x1, window.y2 - window.y1), dim3(16, 16), 0, cudaStream>>>(
             packet, output, window, parameters, exposureGain);
         auto status = cudaPeekAtLastError();

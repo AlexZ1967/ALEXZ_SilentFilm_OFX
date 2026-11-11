@@ -16,6 +16,8 @@ struct SourceFrame {
     std::vector<Pixel> pixels;
 };
 
+struct PixelAspectRatio { int numerator = 1; int denominator = 1; };
+
 /** Decode CFR SDR Rec.709 source frames with a bounded cache, preserving native frame indices. */
 class VideoReader {
     struct Impl;
@@ -27,6 +29,8 @@ public:
     int width() const;
     int height() const;
     double fps() const;
+    PixelAspectRatio pixelAspectRatio() const;
+    bool hasAlphaChannel() const;
     std::int64_t frameCountHint() const;
     std::int64_t decodedCount() const;
     bool eof() const;
@@ -40,7 +44,7 @@ class FrameWriter {
     std::unique_ptr<Impl> impl_;
 public:
     FrameWriter(const std::filesystem::path& directory, const std::string& format,
-        int width, int height, double fps);
+        int width, int height, double fps, const std::string& outputName = "", PixelAspectRatio aspect = {});
     ~FrameWriter();
     void write(const std::vector<Pixel>& pixels, std::int64_t index);
     void finish();

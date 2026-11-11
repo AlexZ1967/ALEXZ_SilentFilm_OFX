@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
@@ -35,7 +36,7 @@ constexpr const char* gainName = "diagnostic_gain_ev";
 constexpr const char* mixName = "temporal_mix";
 constexpr const char* offsetName = "temporal_offset";
 
-enum class EffectKind { Probe, Camera, Negative, Print, Projector, Defects };
+enum class EffectKind { Probe, Camera, CameraOptics, Negative, Print, Projector, Defects };
 
 /** Keep independent plugin names and identifiers within one shared adapter. */
 const char* effectName(EffectKind kind)
@@ -45,8 +46,29 @@ const char* effectName(EffectKind kind)
     if (kind == EffectKind::Projector) return "SilentFilm Projector";
     if (kind == EffectKind::Defects) return "SilentFilm Defects";
     if (kind == EffectKind::Camera) return "SilentFilm Camera";
+    if (kind == EffectKind::CameraOptics) return "SilentFilm Camera Optics";
     return "SilentFilm Host Probe";
 }
+
+/** Trace action boundaries and report slow host calls without synchronizing CUDA work. */
+class ActionTimer {
+    const char* plugin_;
+    const char* action_;
+    bool trace_;
+    std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+public:
+    ActionTimer(const char* plugin, const char* action) : plugin_(plugin), action_(action) {
+        const auto* setting = std::getenv("ALEXZ_SILENTFILM_OFX_TRACE");
+        trace_ = setting && std::strcmp(setting, "1") == 0;
+        if (trace_) std::fprintf(stderr, "[ALEXZSilentFilmOFX] begin plugin=%s action=%s\n", plugin_, action_);
+    }
+    ~ActionTimer() {
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started_).count();
+        if (trace_ || ms >= 250)
+            std::fprintf(stderr, "[ALEXZSilentFilmOFX] end plugin=%s action=%s elapsed_ms=%.3f\n", plugin_, action_, ms);
+    }
+};
 
 struct Failure : std::runtime_error {
     OfxStatus status;
@@ -204,7 +226,8 @@ silentfilm::CameraOpticsParameters cameraSettingsAt(Instance& state, double time
     if (!std::isfinite(time) || !std::isfinite(strength) || !std::isfinite(softness)
         || !std::isfinite(start) || !std::isfinite(end)
         || strength < 0 || strength > 1 || softness < 0 || softness > 1
-        || start < 0 || start > 4 || end < 0.01 || end > 4 || end <= start) {
+        || start < 0 || start > 4 || end < 0.01 || end > 4
+        || end <= start) {
         throw Failure(kOfxStatErrValue, "Invalid camera optics parameter value");
     }
     silentfilm::CameraOpticsParameters value;
@@ -334,7 +357,10 @@ public:
     /** Acquire a float RGBA image and release it if validation fails. */
     Image(OfxImageClipHandle clip, double time)
     {
-        require(effects->clipGetImage(clip, time, nullptr, &handle_), "fetch image");
+        {
+            ActionTimer timer("Host image", "clipGetImage");
+            require(effects->clipGetImage(clip, time, nullptr, &handle_), "fetch image");
+        }
         if (!handle_) {
             throw Failure(kOfxStatFailed, "Host returned an empty image handle");
         }
@@ -433,6 +459,8 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     require(properties->propSetString(props, kOfxImageEffectPluginPropGrouping, 0, "ALEXZ/SilentFilm"), "plugin group");
     const char* description = kind == EffectKind::Probe
         ? "Диагностический эффект для проверки усиления и доступа к соседним кадрам на CPU/CUDA. Это не плёночный вид."
+        : kind == EffectKind::CameraOptics
+        ? "Оптика подготовленных кадров: виньетка и краевой расфокус с общей маской edge_start/end, случайное гуляние фокуса и глобальная мягкость. Экспозиция и движение ручки рассчитываются в приложении Cadence."
         : kind == EffectKind::Camera
         ? "Чёрно-белая ручная съёмка: неравномерный каденс, связанная с вращением ручки выдержка и экспозиция, толчки камеры и гуляющий фокус."
         : kind == EffectKind::Projector
@@ -454,7 +482,7 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     require(properties->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0,
         (kind == EffectKind::Probe || kind == EffectKind::Camera) && temporalAccess ? 1 : 0), "temporal capability");
 #ifdef SILENTFILM_ENABLE_CUDA
-    if (kind == EffectKind::Probe || kind == EffectKind::Camera || kind == EffectKind::Projector) {
+    if (kind == EffectKind::Probe || kind == EffectKind::Camera || kind == EffectKind::CameraOptics || kind == EffectKind::Projector) {
         optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true"), "CUDA capability");
         optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true"), "CUDA stream capability");
     }
@@ -463,7 +491,7 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
 }
 
 /** Define one animated scalar diagnostic control. */
-void defineDouble(OfxParamSetHandle set, const char* name, const char* label, const char* hint, double low, double high, double defaultValue = 0)
+void defineDouble(OfxParamSetHandle set, const char* name, const char* label, const char* hint, double low, double high, double defaultValue = 0, const char* parent = nullptr)
 {
     OfxPropertySetHandle props = nullptr;
     require(parameters->paramDefine(set, kOfxParamTypeDouble, name, &props), "define double");
@@ -475,11 +503,24 @@ void defineDouble(OfxParamSetHandle set, const char* name, const char* label, co
     require(properties->propSetDouble(props, kOfxParamPropDisplayMin, 0, low), "parameter display minimum");
     require(properties->propSetDouble(props, kOfxParamPropDisplayMax, 0, high), "parameter display maximum");
     require(properties->propSetDouble(props, kOfxParamPropIncrement, 0, 0.01), "parameter increment");
+    if (parent) require(properties->propSetString(props, kOfxParamPropParent, 0, parent), "parameter parent");
+}
+
+/** Declare the control page before its children and publish its preferred order. */
+OfxPropertySetHandle defineControlsPage(OfxParamSetHandle set)
+{
+    OfxPropertySetHandle page = nullptr, setProperties = nullptr;
+    require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &page), "define controls page");
+    require(properties->propSetString(page, kOfxPropLabel, 0, "Controls"), "controls page label");
+    require(parameters->paramSetGetPropertySet(set, &setProperties), "parameter set properties");
+    optionalProperty(properties->propSetString(setProperties, kOfxPluginPropParamPageOrder, 0, "Controls"), "controls page order");
+    return page;
 }
 
 /** Define readable material controls and an explicit input/output transfer. */
 void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
 {
+    const auto page = defineControlsPage(set);
     const bool negative = kind == EffectKind::Negative;
     OfxPropertySetHandle props = nullptr;
     defineDouble(set, "exposure_ev", negative ? "Negative Exposure (EV)" : "Print Exposure (EV)",
@@ -526,7 +567,7 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
         optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Показывает пропускание негатива через фиксированную нейтральную печать. Для настройки временно отключите Print. Перед подачей сигнала в SilentFilm Print выключите этот режим: preview — уже позитив, а не негатив."), "preview hint");
         require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "preview default");
     }
-    require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &props), "define film page");
+    props = page;
     int index = 0;
     for (const char* name : {"exposure_ev", "contrast", "shadow_softness", "highlight_softness", "fog_strength", "halation_strength", "halation_size", "grain_strength", "grain_size", "grain_seed", "encoding"}) {
         require(properties->propSetString(props, kOfxParamPropPageChild, index++, name), "film page control");
@@ -535,76 +576,98 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
 }
 
 /** Define the first stateless camera-optics controls independently from cadence. */
-void defineCameraControls(OfxParamSetHandle set)
+void defineCameraControls(OfxParamSetHandle set, bool opticsOnly = false)
 {
-    OfxPropertySetHandle playbackProps = nullptr;
-    require(parameters->paramDefine(set, kOfxParamTypeChoice, "playback_mode", &playbackProps), "define camera playback mode");
-    require(properties->propSetString(playbackProps, kOfxPropLabel, 0, "Playback Mode"), "camera playback label");
-    optionalProperty(properties->propSetString(playbackProps, kOfxParamPropHint, 0,
-        "Проекция снятых кадров — движение ускоряется при медленном вращении ручки и замедляется при быстром. Снятые кадры показываются равномерно; один общий коэффициент сохраняет длительность клипа. При 10–30 FPS и Variation=1 эффект выраженный. Сохранение исходного времени — прежний режим: меняются повторы/смаз, средняя скорость действия сохраняется."), "camera playback hint");
-    require(properties->propSetString(playbackProps, kOfxParamPropChoiceOption, 0, "Проекция снятых кадров"), "camera projected mode");
-    require(properties->propSetString(playbackProps, kOfxParamPropChoiceOption, 1, "Сохранение исходного времени"), "camera real-time mode");
-    require(properties->propSetInt(playbackProps, kOfxParamPropDefault, 0, 0), "camera playback default");
-    defineDouble(set, "vignette_strength", "Vignette Strength",
-        "Затемняет изображение по краям до заданной доли. 0 — выключено; начните с 0,10–0,15, значение 0,6 уже выраженное. Радиус и ширину перехода задают Edge Start и Edge End. Альфа не изменяется.", 0, 1, 0.12);
-    defineDouble(set, "edge_softness", "Edge Softness",
-        "Переменный расфокус по виньеточной маске: в центре резкость сохраняется, к краям радиус размытия растёт. 0 выключает; начните с 0,02–0,04, 0,15 уже заметно. При 1920 px значение 0,15 даёт максимальную sigma около 7,2 px. Поддерживает CUDA; детализация снижается сильнее при большом значении.", 0, 1, 0.15);
-    defineDouble(set, "camera_softness", "Global Softness",
-        "Общая оптическая мягкость съёмки до негатива. 0 сохраняет резкость; начните с 0,05–0,12. Не путать с краевым расфокусом Edge Softness. Использует separable Gaussian из модели Comfy.", 0, 1, 0.1);
-    defineDouble(set, "focus_drift", "Focus Drift",
-        "Медленно гуляющий фокус, привязанный к кадрам ручной съёмки. 0 выключает; 0,02–0,04 — деликатное дыхание резкости, 0,1 уже заметно. Фокус держится вместе с виртуальным кадром и воспроизводится после перемотки.", 0, 0.5, 0.03);
+    const auto page = defineControlsPage(set);
+    if (opticsOnly) {
+        for (const auto* name : {"lens_edges", "focus_optics"}) {
+            OfxPropertySetHandle group = nullptr;
+            require(parameters->paramDefine(set, kOfxParamTypeGroup, name, &group), "define optics group");
+            require(properties->propSetString(group, kOfxPropLabel, 0,
+                std::strcmp(name, "lens_edges") == 0 ? "Vignette and Edge Blur" : "Focus and Softness"), "optics group label");
+            require(properties->propSetInt(group, kOfxParamPropGroupOpen, 0, 1), "optics group open");
+        }
+    }
+    if (!opticsOnly) {
+        OfxPropertySetHandle playbackProps = nullptr;
+        require(parameters->paramDefine(set, kOfxParamTypeChoice, "playback_mode", &playbackProps), "define camera playback mode");
+        require(properties->propSetString(playbackProps, kOfxPropLabel, 0, "Playback Mode"), "camera playback label");
+        optionalProperty(properties->propSetString(playbackProps, kOfxParamPropHint, 0,
+            "Проекция снятых кадров — движение ускоряется при медленном вращении ручки и замедляется при быстром. Снятые кадры показываются равномерно; один общий коэффициент сохраняет длительность клипа. При 10–30 FPS и Variation=1 эффект выраженный. Сохранение исходного времени — прежний режим: меняются повторы/смаз, средняя скорость действия сохраняется."), "camera playback hint");
+        require(properties->propSetString(playbackProps, kOfxParamPropChoiceOption, 0, "Проекция снятых кадров"), "camera projected mode");
+        require(properties->propSetString(playbackProps, kOfxParamPropChoiceOption, 1, "Сохранение исходного времени"), "camera real-time mode");
+        require(properties->propSetInt(playbackProps, kOfxParamPropDefault, 0, 0), "camera playback default");
+    }
+    defineDouble(set, "vignette_strength", opticsOnly ? "vignette_strength" : "Vignette Strength",
+        "Затемняет изображение по краям до заданной доли. 0 — выключено; начните с 0,10–0,15, значение 0,6 уже выраженное. Радиус и ширину перехода задают Edge Start и Edge End. Альфа не изменяется.",
+        0, 1, 0.12, opticsOnly ? "lens_edges" : nullptr);
+    defineDouble(set, "edge_start", opticsOnly ? "edge_start" : "Edge Start",
+        "Радиус начала виньетки и краевого расфокуса в единицах половины ширины. До этого радиуса центр сохраняется. Старт 0,6; edge_end должен быть больше edge_start.",
+        0, 4, 0.6, opticsOnly ? "lens_edges" : nullptr);
+    defineDouble(set, "edge_end", opticsOnly ? "edge_end" : "Edge End",
+        "Радиус полной силы виньетки и краевого расфокуса. Разность edge_end − edge_start задаёт ширину перехода. Старт 1,0.",
+        0.01, 4, 1.0, opticsOnly ? "lens_edges" : nullptr);
+    defineDouble(set, "edge_softness", opticsOnly ? "edge_softness" : "Edge Softness",
+        "Переменный расфокус по виньеточной маске: в центре резкость сохраняется, к краям радиус размытия растёт. 0 выключает; начните с 0,02–0,04, 0,15 уже заметно. При 1920 px значение 0,15 даёт максимальную sigma около 7,2 px. Маску задают edge_start и edge_end.", 0, 1, 0.15, opticsOnly ? "lens_edges" : nullptr);
+    defineDouble(set, "camera_softness", opticsOnly ? "softness" : "Global Softness",
+        "Общая оптическая мягкость съёмки до негатива. 0 сохраняет резкость; начните с 0,05–0,12. Использует separable Gaussian из модели Comfy.", 0, 1, 0.1, opticsOnly ? "focus_optics" : nullptr);
+    defineDouble(set, "focus_drift", opticsOnly ? "focus_drift_strength" : "Focus Drift",
+        opticsOnly
+            ? "Случайное гуляние фокуса по кадрам результата Cadence. 0 выключает; 0,02–0,04 — деликатное дыхание резкости, 0,1 уже заметно. При перемотке рисунок воспроизводится."
+            : "Медленно гуляющий фокус, привязанный к кадрам ручной съёмки. 0 выключает; 0,02–0,04 — деликатное дыхание резкости, 0,1 уже заметно. Фокус держится вместе с виртуальным кадром и воспроизводится после перемотки.",
+        0, 0.5, 0.03, opticsOnly ? "focus_optics" : nullptr);
     OfxPropertySetHandle focusProps = nullptr;
     require(parameters->paramDefine(set, kOfxParamTypeInteger, "focus_seed", &focusProps), "define focus seed");
-    require(properties->propSetString(focusProps, kOfxPropLabel, 0, "Focus Seed"), "focus seed label");
+    require(properties->propSetString(focusProps, kOfxPropLabel, 0, opticsOnly ? "seed" : "Focus Seed"), "focus seed label");
+    if (opticsOnly) require(properties->propSetString(focusProps, kOfxParamPropParent, 0, "focus_optics"), "focus seed parent");
     optionalProperty(properties->propSetString(focusProps, kOfxParamPropHint, 0, "Seed рисунка гуляющего фокуса. При одинаковом seed и кадре фокус воспроизводится; рисунок независим от зерна."), "focus seed hint");
     require(properties->propSetInt(focusProps, kOfxParamPropDefault, 0, 1925), "focus seed default");
     require(properties->propSetInt(focusProps, kOfxParamPropMin, 0, 0), "focus seed minimum");
     require(properties->propSetInt(focusProps, kOfxParamPropMax, 0, 2147483647), "focus seed maximum");
     require(properties->propSetInt(focusProps, kOfxParamPropDisplayMin, 0, 0), "focus seed display minimum");
     require(properties->propSetInt(focusProps, kOfxParamPropDisplayMax, 0, 2147483647), "focus seed display maximum");
-    defineDouble(set, "capture_fps_min", "Capture FPS Min",
-        "Нижняя скорость съёмки, когда ручка замедляется. В режиме проекции это ускоряет действие. Старт 16 кадров/с; для проверки выберите Min=10, Max=30, Variation=1. Общая длительность клипа сохраняется.", 8, 36, 16);
-    defineDouble(set, "capture_fps_max", "Capture FPS Max",
-        "Верхняя скорость ручной съёмки. В режиме проекции это замедляет действие. Старт 20 кадров/с. Должна быть не ниже Capture FPS Min; полный размах включается при Crank Rate Variation=1.", 8, 36, 20);
-    defineDouble(set, "crank_variation", "Crank Rate Variation",
-        "Размах циклической скорости внутри min/max. 0 — ровная ручка; 0,6–0,8 — заметный, но естественный ход; 1 — весь заданный диапазон. Один оборот связан с продвижением восьми кадров плёнки, как в Comfy.", 0, 1, 0.7);
-    defineDouble(set, "crank_irregularity", "Crank Irregularity",
-        "Небольшое неповторяющееся отклонение темпа от оборота к обороту поверх основного цикла. 0 — чистая циклическая ручка; 0,1–0,25 — лёгкая механическая неровность; 1 — выраженная. Задаётся Camera Seed.", 0, 1, 0.15);
-    defineDouble(set, "shutter_fraction", "Shutter Fraction",
-        "Доля периода виртуального кадра, в течение которой затвор открыт. 0,5 — половина периода; 1 — полный период. Медленнее ручка — длиннее выдержка. Для полного отключения временного смаза поставьте Motion Blur Strength=0.", 0, 1.5, 0.65);
-    defineDouble(set, "motion_blur_strength", "Motion Blur Strength",
-        "Масштабирует временную интеграцию и небольшое движение выборки внутри удерживаемого кадра по модели Comfy. 0 выключает смаз; 0,8 — естественный старт; 1,22 — заметный след движения. Не меняет сам диапазон скорости ручки.", 0, 2, 0.8);
-    defineDouble(set, "exposure_variation", "Crank Exposure Link",
-        "Связь скорости ручки с экспозицией: медленнее вращение удлиняет экспозицию и осветляет кадр, быстрее — сокращает её и затемняет. 0 — постоянная яркость; 0,3–0,5 — деликатно; 1 — полный закон выдержки. Базовая экспозиция калибруется по середине диапазона FPS.", 0, 1, 1);
-    OfxPropertySetHandle captureProps = nullptr;
-    require(parameters->paramDefine(set, kOfxParamTypeInteger, "exposure_samples", &captureProps), "define exposure samples");
-    require(properties->propSetString(captureProps, kOfxPropLabel, 0, "Exposure Samples"), "exposure samples label");
-    optionalProperty(properties->propSetString(captureProps, kOfxParamPropHint, 0, "Число временных отсчётов внутри выдержки. Больше — плавнее смаз, но медленнее render. Начните с 5; 1 оставляет один временной отсчёт."), "exposure samples hint");
-    require(properties->propSetInt(captureProps, kOfxParamPropDefault, 0, 5), "exposure samples default");
-    require(properties->propSetInt(captureProps, kOfxParamPropMin, 0, 1), "exposure samples minimum");
-    require(properties->propSetInt(captureProps, kOfxParamPropMax, 0, 9), "exposure samples maximum");
-    require(properties->propSetInt(captureProps, kOfxParamPropDisplayMin, 0, 1), "exposure samples display minimum");
-    require(properties->propSetInt(captureProps, kOfxParamPropDisplayMax, 0, 9), "exposure samples display maximum");
-    defineDouble(set, "camera_shake", "Crank Camera Shake",
-        "Нерегулярные сдвиги и лёгкие наклоны от усилия руки, привязанные к фазе той же ручки, что задаёт каденс и выдержку. 0 выключает; 0,15–0,3 — небольшие толчки; 1 — сильные. Не путать с дрожанием проектора.", 0, 1, 0.25);
-    OfxPropertySetHandle crankSeedProps = nullptr;
-    require(parameters->paramDefine(set, kOfxParamTypeInteger, "camera_seed", &crankSeedProps), "define camera seed");
-    require(properties->propSetString(crankSeedProps, kOfxPropLabel, 0, "Camera Seed"), "camera seed label");
-    optionalProperty(properties->propSetString(crankSeedProps, kOfxParamPropHint, 0, "Общий seed ручки: фиксирует нерегулярность темпа и связанные с оборотом толчки камеры. Можно менять независимо от Focus Seed."), "camera seed hint");
-    require(properties->propSetInt(crankSeedProps, kOfxParamPropDefault, 0, 1925), "camera seed default");
-    require(properties->propSetInt(crankSeedProps, kOfxParamPropMin, 0, 0), "camera seed minimum");
-    require(properties->propSetInt(crankSeedProps, kOfxParamPropMax, 0, 2147483647), "camera seed maximum");
-    require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMin, 0, 0), "camera seed display minimum");
-    require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMax, 0, 2147483647), "camera seed display maximum");
-    defineDouble(set, "edge_start", "Edge Start",
-        "Радиус начала виньетки в единицах половины ширины кадра. До этого радиуса центр не затемняется. Старт 0,6; меньшее значение распространяет переход ближе к центру.", 0, 4, 0.6);
-    defineDouble(set, "edge_end", "Edge End",
-        "Радиус полной силы виньетки в единицах половины ширины кадра. Старт 1,0; вместе с Edge Start задаёт плавность перехода. Должен быть больше Edge Start; если выходит за углы кадра, полная сила может не достигаться.", 0.01, 4, 1.0);
-    OfxPropertySetHandle props = nullptr;
-    require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &props), "define camera page");
+    if (!opticsOnly) {
+        defineDouble(set, "capture_fps_min", "Capture FPS Min",
+            "Нижняя скорость съёмки, когда ручка замедляется. В режиме проекции это ускоряет действие. Старт 16 кадров/с; для проверки выберите Min=10, Max=30, Variation=1. Общая длительность клипа сохраняется.", 8, 36, 16);
+        defineDouble(set, "capture_fps_max", "Capture FPS Max",
+            "Верхняя скорость ручной съёмки. В режиме проекции это замедляет действие. Старт 20 кадров/с. Должна быть не ниже Capture FPS Min; полный размах включается при Crank Rate Variation=1.", 8, 36, 20);
+        defineDouble(set, "crank_variation", "Crank Rate Variation",
+            "Размах циклической скорости внутри min/max. 0 — ровная ручка; 0,6–0,8 — заметный, но естественный ход; 1 — весь заданный диапазон. Один оборот связан с продвижением восьми кадров плёнки, как в Comfy.", 0, 1, 0.7);
+        defineDouble(set, "crank_irregularity", "Crank Irregularity",
+            "Небольшое неповторяющееся отклонение темпа от оборота к обороту поверх основного цикла. 0 — чистая циклическая ручка; 0,1–0,25 — лёгкая механическая неровность; 1 — выраженная. Задаётся Camera Seed.", 0, 1, 0.15);
+        defineDouble(set, "shutter_fraction", "Shutter Fraction",
+            "Доля периода виртуального кадра, в течение которой затвор открыт. 0,5 — половина периода; 1 — полный период. Медленнее ручка — длиннее выдержка. Для полного отключения временного смаза поставьте Motion Blur Strength=0.", 0, 1.5, 0.65);
+        defineDouble(set, "motion_blur_strength", "Motion Blur Strength",
+            "Масштабирует временную интеграцию и небольшое движение выборки внутри удерживаемого кадра по модели Comfy. 0 выключает смаз; 0,8 — естественный старт; 1,22 — заметный след движения. Не меняет сам диапазон скорости ручки.", 0, 2, 0.8);
+        defineDouble(set, "exposure_variation", "Crank Exposure Link",
+            "Связь скорости ручки с экспозицией: медленнее вращение удлиняет экспозицию и осветляет кадр, быстрее — сокращает её и затемняет. 0 — постоянная яркость; 0,3–0,5 — деликатно; 1 — полный закон выдержки. Базовая экспозиция калибруется по середине диапазона FPS.", 0, 1, 1);
+        OfxPropertySetHandle captureProps = nullptr;
+        require(parameters->paramDefine(set, kOfxParamTypeInteger, "exposure_samples", &captureProps), "define exposure samples");
+        require(properties->propSetString(captureProps, kOfxPropLabel, 0, "Exposure Samples"), "exposure samples label");
+        optionalProperty(properties->propSetString(captureProps, kOfxParamPropHint, 0, "Число временных отсчётов внутри выдержки. Больше — плавнее смаз, но медленнее render. Начните с 5; 1 оставляет один временной отсчёт."), "exposure samples hint");
+        require(properties->propSetInt(captureProps, kOfxParamPropDefault, 0, 5), "exposure samples default");
+        require(properties->propSetInt(captureProps, kOfxParamPropMin, 0, 1), "exposure samples minimum");
+        require(properties->propSetInt(captureProps, kOfxParamPropMax, 0, 9), "exposure samples maximum");
+        require(properties->propSetInt(captureProps, kOfxParamPropDisplayMin, 0, 1), "exposure samples display minimum");
+        require(properties->propSetInt(captureProps, kOfxParamPropDisplayMax, 0, 9), "exposure samples display maximum");
+        defineDouble(set, "camera_shake", "Crank Camera Shake",
+            "Нерегулярные сдвиги и лёгкие наклоны от усилия руки, привязанные к фазе той же ручки, что задаёт каденс и выдержку. 0 выключает; 0,15–0,3 — небольшие толчки; 1 — сильные. Не путать с дрожанием проектора.", 0, 1, 0.25);
+        OfxPropertySetHandle crankSeedProps = nullptr;
+        require(parameters->paramDefine(set, kOfxParamTypeInteger, "camera_seed", &crankSeedProps), "define camera seed");
+        require(properties->propSetString(crankSeedProps, kOfxPropLabel, 0, "Camera Seed"), "camera seed label");
+        optionalProperty(properties->propSetString(crankSeedProps, kOfxParamPropHint, 0, "Общий seed ручки: фиксирует нерегулярность темпа и связанные с оборотом толчки камеры. Можно менять независимо от Focus Seed."), "camera seed hint");
+        require(properties->propSetInt(crankSeedProps, kOfxParamPropDefault, 0, 1925), "camera seed default");
+        require(properties->propSetInt(crankSeedProps, kOfxParamPropMin, 0, 0), "camera seed minimum");
+        require(properties->propSetInt(crankSeedProps, kOfxParamPropMax, 0, 2147483647), "camera seed maximum");
+        require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMin, 0, 0), "camera seed display minimum");
+        require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMax, 0, 2147483647), "camera seed display maximum");
+    }
+    OfxPropertySetHandle props = page;
     const char* children[] = {"playback_mode", "capture_fps_min", "capture_fps_max", "crank_variation", "crank_irregularity", "shutter_fraction", "motion_blur_strength", "exposure_variation", "exposure_samples", "camera_shake", "camera_seed", "focus_drift", "focus_seed", "vignette_strength", "edge_softness", "camera_softness", "edge_start", "edge_end"};
-    for (int index = 0; index < 18; ++index) {
-        require(properties->propSetString(props, kOfxParamPropPageChild, index, children[index]), "camera page control");
+    const char* opticsChildren[] = {"vignette_strength", "edge_start", "edge_end", "edge_softness", "camera_softness", "focus_drift", "focus_seed"};
+    for (int index = 0; index < (opticsOnly ? 7 : 18); ++index) {
+        require(properties->propSetString(props, kOfxParamPropPageChild, index,
+            opticsOnly ? opticsChildren[index] : children[index]), "camera page control");
     }
 }
 
@@ -623,11 +686,12 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
     }
     OfxParamSetHandle set = nullptr;
     require(effects->getParamSet(effect, &set), "parameter set");
-    if (kind == EffectKind::Camera) {
-        defineCameraControls(set);
+    if (kind == EffectKind::Camera || kind == EffectKind::CameraOptics) {
+        defineCameraControls(set, kind == EffectKind::CameraOptics);
         return kOfxStatOK;
     }
     if (kind == EffectKind::Projector) {
+        const auto page = defineControlsPage(set);
         defineDouble(set, "gate_weave_px", "Gate Weave (px)",
             "Дрожание плёнки в кадровом окне проектора. Сдвигает весь позитив, зерно, пыль и царапины перед glow. 0 выключает; 0,5–1 px — деликатно, 2–4 — заметно. Пиксели полного выходного кадра; proxy масштабируется. Независимо от ручки Camera; альфа движется вместе с плёнкой.", 0, 8, 0.8);
         defineDouble(set, "lamp_flicker", "Lamp Flicker",
@@ -656,12 +720,13 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetString(transfer, kOfxParamPropChoiceOption, 0, "Linear Rec.709"), "projector linear transfer");
         require(properties->propSetString(transfer, kOfxParamPropChoiceOption, 1, "sRGB"), "projector sRGB transfer");
         require(properties->propSetString(transfer, kOfxParamPropChoiceOption, 2, "Rec.709 Gamma 2.4"), "projector gamma transfer");
-        require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &transfer), "define projector page");
+        transfer = page;
         const char* controls[] = {"gate_weave_px", "lamp_flicker", "lamp_breathing", "projector_seed", "glow_strength", "glow_size", "encoding"};
         for (int i = 0; i < 7; ++i) require(properties->propSetString(transfer, kOfxParamPropPageChild, i, controls[i]), "projector page control");
         return kOfxStatOK;
     }
     if (kind == EffectKind::Defects) {
+        const auto page = defineControlsPage(set);
         OfxPropertySetHandle choice = nullptr;
         require(parameters->paramDefine(set, kOfxParamTypeChoice, "material", &choice), "define defect material");
         require(properties->propSetString(choice, kOfxPropLabel, 0, "Material Stage"), "defect material label");
@@ -699,7 +764,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         for (int i = 0; i < 3; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i,
             i == 0 ? "Linear Rec.709" : i == 1 ? "sRGB" : "Rec.709 Gamma 2.4"), "defect transfer option");
         require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 1), "defect transfer default");
-        require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &choice), "define defect page");
+        choice = page;
         const char* children[] = {"material", "pattern", "strength", "size", "amount", "persistence", "seed", "encoding"};
         for (int i = 0; i < 8; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
         return kOfxStatOK;
@@ -708,6 +773,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         defineFilmControls(set, kind);
         return kOfxStatOK;
     }
+    const auto page = defineControlsPage(set);
     defineDouble(set, gainName, "Diagnostic Gain (EV)", "Диагностическое усиление RGB без преобразования цветовой кривой: 0 — без изменения, +1 удваивает RGB, −1 делит RGB пополам. Альфа не меняется. Для Negative/Print используйте экспозицию плёнки.", -4, 4);
     defineDouble(set, mixName, "Temporal Mix", "Смешивание текущего кадра с соседними: 0 — только текущий; 1 — 50% текущего и по 25% соседних. Требуется temporal access хоста. Это проверка доступа к кадрам, не optical flow.", 0, 1);
     OfxPropertySetHandle props = nullptr;
@@ -719,7 +785,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
     require(properties->propSetInt(props, kOfxParamPropMax, 0, 8), "offset maximum");
     require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, 1), "offset display minimum");
     require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 8), "offset display maximum");
-    require(parameters->paramDefine(set, kOfxParamTypePage, "Controls", &props), "define page");
+    props = page;
     require(properties->propSetString(props, kOfxParamPropPageChild, 0, gainName), "page gain");
     require(properties->propSetString(props, kOfxParamPropPageChild, 1, mixName), "page mix");
     require(properties->propSetString(props, kOfxParamPropPageChild, 2, offsetName), "page offset");
@@ -739,7 +805,7 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, gainName, &state->gain, nullptr), "gain parameter");
         require(parameters->paramGetHandle(set, mixName, &state->mix, nullptr), "mix parameter");
         require(parameters->paramGetHandle(set, offsetName, &state->offset, nullptr), "offset parameter");
-    } else if (kind == EffectKind::Camera) {
+    } else if (kind == EffectKind::Camera || kind == EffectKind::CameraOptics) {
         require(parameters->paramGetHandle(set, "vignette_strength", &state->vignetteStrength, nullptr), "camera vignette strength parameter");
         require(parameters->paramGetHandle(set, "edge_softness", &state->edgeSoftness, nullptr), "camera edge softness parameter");
         require(parameters->paramGetHandle(set, "edge_start", &state->edgeStart, nullptr), "camera edge start parameter");
@@ -747,17 +813,19 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "camera_softness", &state->cameraSoftness, nullptr), "camera softness parameter");
         require(parameters->paramGetHandle(set, "focus_drift", &state->focusDrift, nullptr), "camera focus drift parameter");
         require(parameters->paramGetHandle(set, "focus_seed", &state->focusSeed, nullptr), "camera focus seed parameter");
-        require(parameters->paramGetHandle(set, "playback_mode", &state->playbackMode, nullptr), "camera playback mode parameter");
-        require(parameters->paramGetHandle(set, "capture_fps_min", &state->captureFpsMin, nullptr), "camera minimum rate parameter");
-        require(parameters->paramGetHandle(set, "capture_fps_max", &state->captureFpsMax, nullptr), "camera maximum rate parameter");
-        require(parameters->paramGetHandle(set, "crank_variation", &state->crankVariation, nullptr), "camera rate variation parameter");
-        require(parameters->paramGetHandle(set, "crank_irregularity", &state->crankIrregularity, nullptr), "camera crank irregularity parameter");
-        require(parameters->paramGetHandle(set, "shutter_fraction", &state->shutterFraction, nullptr), "camera shutter parameter");
-        require(parameters->paramGetHandle(set, "motion_blur_strength", &state->motionBlurStrength, nullptr), "camera motion blur parameter");
-        require(parameters->paramGetHandle(set, "exposure_variation", &state->exposureVariation, nullptr), "camera exposure parameter");
-        require(parameters->paramGetHandle(set, "exposure_samples", &state->exposureSamples, nullptr), "camera samples parameter");
-        require(parameters->paramGetHandle(set, "camera_shake", &state->cameraShake, nullptr), "camera shake parameter");
-        require(parameters->paramGetHandle(set, "camera_seed", &state->cameraSeed, nullptr), "camera seed parameter");
+        if (kind != EffectKind::CameraOptics) {
+            require(parameters->paramGetHandle(set, "playback_mode", &state->playbackMode, nullptr), "camera playback mode parameter");
+            require(parameters->paramGetHandle(set, "capture_fps_min", &state->captureFpsMin, nullptr), "camera minimum rate parameter");
+            require(parameters->paramGetHandle(set, "capture_fps_max", &state->captureFpsMax, nullptr), "camera maximum rate parameter");
+            require(parameters->paramGetHandle(set, "crank_variation", &state->crankVariation, nullptr), "camera rate variation parameter");
+            require(parameters->paramGetHandle(set, "crank_irregularity", &state->crankIrregularity, nullptr), "camera crank irregularity parameter");
+            require(parameters->paramGetHandle(set, "shutter_fraction", &state->shutterFraction, nullptr), "camera shutter parameter");
+            require(parameters->paramGetHandle(set, "motion_blur_strength", &state->motionBlurStrength, nullptr), "camera motion blur parameter");
+            require(parameters->paramGetHandle(set, "exposure_variation", &state->exposureVariation, nullptr), "camera exposure parameter");
+            require(parameters->paramGetHandle(set, "exposure_samples", &state->exposureSamples, nullptr), "camera samples parameter");
+            require(parameters->paramGetHandle(set, "camera_shake", &state->cameraShake, nullptr), "camera shake parameter");
+            require(parameters->paramGetHandle(set, "camera_seed", &state->cameraSeed, nullptr), "camera seed parameter");
+        }
     } else if (kind == EffectKind::Projector) {
         require(parameters->paramGetHandle(set, "gate_weave_px", &state->gateWeave, nullptr), "projector weave parameter");
         require(parameters->paramGetHandle(set, "lamp_flicker", &state->lampFlicker, nullptr), "projector flicker parameter");
@@ -950,6 +1018,42 @@ OfxStatus renderCamera(OfxImageEffectHandle effect, Instance& state, double time
     return kOfxStatOK;
 }
 
+/** Apply vignette, softness and independent focus drift to the current clip frame. */
+OfxStatus renderCameraOptics(OfxImageEffectHandle effect, Instance& state, double time,
+    OfxPropertySetHandle in, Image& output, bool cudaEnabled, silentfilm::RenderWindow region)
+{
+    if (!std::isfinite(time)) throw Failure(kOfxStatErrValue, "Invalid optics frame time");
+    double range[2]{};
+    sourceFrameRange(state.source, range);
+    // OFX time в этом adapter измеряется в кадрах, как и Source frame range.
+    const auto frame = static_cast<std::int64_t>(std::floor(time - range[0] + 1e-9));
+    auto optics = cameraSettingsAt(state, time, frame);
+    Image source(state.source, time);
+    optics.sourcePremultiplied = source.premultiplied();
+    optics.outputPremultiplied = output.premultiplied();
+#ifdef SILENTFILM_ENABLE_CUDA
+    if (cudaEnabled) {
+        void* stream = nullptr;
+        const auto streamStatus = properties->propGetPointer(in, kOfxImageEffectPropCudaStream, 0, &stream);
+        optionalProperty(streamStatus, "optics CUDA stream");
+        const silentfilm::CameraExposureSample sample{source.view(), 0, {}, 0, 1};
+        const silentfilm::CameraSampleTransform transform{};
+        const auto status = silentfilm::renderCudaCamera(&sample, &transform, 1, output.view(), region,
+            optics, 1.0f, false, stream, streamStatus == kOfxStatOK);
+        if (status.code) throw Failure(kOfxStatFailed, status.message ? status.message : "CUDA optics failed");
+        return kOfxStatOK;
+    }
+#else
+    (void)in;
+    (void)cudaEnabled;
+#endif
+    if (!silentfilm::renderCameraCpu(source.view(), output.view(), region, optics, 1.0f, cameraAbort, effect)) {
+        if (effects->abort(effect)) return kOfxStatOK;
+        throw Failure(kOfxStatFailed, "Camera optics failed");
+    }
+    return kOfxStatOK;
+}
+
 /** Tell the host which source frame range is needed for this particular request. */
 OfxStatus framesNeeded(OfxImageEffectHandle effect, OfxPropertySetHandle in, OfxPropertySetHandle out)
 {
@@ -1061,9 +1165,12 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
 #endif
     if (effects->abort(effect)) return kOfxStatOK;
     Image output(state.output, time);
-    if (isCamera) {
+    if (isCamera || state.kind == EffectKind::CameraOptics) {
         int window[4]{};
         require(properties->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window), "render window");
+        if (state.kind == EffectKind::CameraOptics)
+            return renderCameraOptics(effect, state, time, in, output, cudaEnabled != 0,
+                {window[0], window[1], window[2], window[3]});
         return renderCamera(effect, state, time, in, output, cudaEnabled != 0,
             {window[0], window[1], window[2], window[3]});
     }
@@ -1174,6 +1281,7 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
     const auto effect = static_cast<OfxImageEffectHandle>(const_cast<void*>(handle));
     try {
         if (!action) return kOfxStatErrValue;
+        ActionTimer timer(effectName(kind), action);
         if (std::strcmp(action, kOfxActionLoad) == 0) return load();
         if (std::strcmp(action, kOfxActionUnload) == 0) return kOfxStatOK;
         if (!properties || !effects || !parameters) return kOfxStatErrMissingHostFeature;
@@ -1203,12 +1311,13 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 5, setHost, entry<EffectKind::Probe>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 8, setHost, entry<EffectKind::Camera>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 5, setHost, entry<EffectKind::Negative>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 5, setHost, entry<EffectKind::Print>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 9, setHost, entry<EffectKind::Projector>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 5, setHost, entry<EffectKind::Defects>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 6, setHost, entry<EffectKind::Probe>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 9, setHost, entry<EffectKind::Camera>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 6, setHost, entry<EffectKind::Negative>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 6, setHost, entry<EffectKind::Print>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 10, setHost, entry<EffectKind::Projector>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 6, setHost, entry<EffectKind::Defects>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 15, setHost, entry<EffectKind::CameraOptics>},
 };
 
 constexpr int pluginCount = static_cast<int>(sizeof(plugins) / sizeof(plugins[0]));

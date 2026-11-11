@@ -9,6 +9,8 @@
 
 namespace silentfilm {
 
+constexpr int maximumCameraExposureSamples = 17;
+
 struct HandCrankSettings {
     float minimumFps = 16.0f;
     float maximumFps = 20.0f;

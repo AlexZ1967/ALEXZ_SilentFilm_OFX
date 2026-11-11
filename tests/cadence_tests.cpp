@@ -11,7 +11,7 @@ void require(bool value, const char* message) { if (!value) throw std::runtime_e
 
 void physicalCounts()
 {
-    for (float rate : {16.0f, 20.0f, 22.0f, 30.0f}) {
+    for (float rate : {1.0f, 16.0f, 20.0f, 22.0f, 30.0f, 60.0f}) {
         silentfilm::HandCrankSchedule schedule;
         silentfilm::CadenceSettings settings;
         settings.crank.minimumFps = settings.crank.maximumFps = rate;
@@ -55,6 +55,10 @@ void variableExposure()
             "Shutter integration is not centered on its physical exposure");
     }
     require(longest / shortest > 2.4, "Physical projection lost crank speed variation");
+    settings.exposureSamples = 17;
+    const auto detailed = silentfilm::planCaptureExposure(captures[0], 25, settings);
+    require(detailed.count == 17 && detailed.positions[16] > detailed.positions[0]
+        && detailed.weights[8] > detailed.weights[7], "17-sample exposure was truncated or ignored");
     (void)schedule.phaseAt(60, settings.crank);
     for (std::int64_t i = count; i-- > 0;) {
         const auto again = schedule.captureAtIndex(i, settings.crank);

@@ -1,0 +1,29 @@
+"""Launch the external GTK application from Resolve's Workspace Scripts menu."""
+
+import os
+from pathlib import Path
+import subprocess
+
+
+def launch():
+    """Detach the system GTK process and keep startup diagnostics in the project workspace."""
+    launcher = Path("@CMAKE_BINARY_DIR@/bin/SilentFilm_Cadence_App")
+    directory = Path("@CMAKE_CURRENT_SOURCE_DIR@/renders/cadence")
+    if not launcher.is_file():
+        raise RuntimeError("Сначала собери SilentFilm Cadence: " + str(launcher))
+    directory.mkdir(parents=True, exist_ok=True)
+    log_path = directory / "app_start.log"
+    environment = os.environ.copy()
+    for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH"):
+        environment.pop(name, None)
+    with log_path.open("ab") as log:
+        log.write(b"\n--- SilentFilm Cadence GUI ---\n")
+        log.flush()
+        process = subprocess.Popen(["/bin/sh", str(launcher)], stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT, env=environment,
+                                   cwd=str(directory), start_new_session=True)
+    print(f"[SilentFilm Cadence] Запущено GTK-окно, PID={process.pid}. Если окно не появилось: {log_path}")
+
+
+# Resolve исполняет скрипт меню; окно и GTK живут в отдельном процессе.
+launch()
