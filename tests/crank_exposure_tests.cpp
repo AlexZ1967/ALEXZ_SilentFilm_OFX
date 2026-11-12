@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -30,11 +31,18 @@ void maps(const std::filesystem::path& path)
     CrankExposureMapCache cache;
     const auto first = cache.load(path.string());
     require(first->gains == gains, "Gain map round trip lost precision");
-    require(first->at(3, 0, 25) == 2 && first->at(0, 1, 25) == 1 && first->at(1, -1, 25) == 0.5f,
+    require(first->at(3, 0) == 2 && first->at(0, 1) == 1 && first->at(1, -1) == 0.5f,
         "Frame/trim offset indexing is incorrect");
-    rejected([&] { first->at(0, 0, 50); });
-    rejected([&] { first->at(4, 0, 25); });
-    rejected([&] { first->at(0, -1, 25); });
+    for (double fps : {24.0, 25.0, 50.0}) {
+        auto sameFrames = *first;
+        sameFrames.frameRate = fps;
+        require(sameFrames.at(2, 0) == 1.5f, "Presentation FPS changed a frame-indexed exposure gain");
+    }
+    require(first->at(0, 0) == 0.5f && first->at(3, 0) == 2, "Map lost its first or last frame");
+    rejected([&] { first->at(std::numeric_limits<double>::quiet_NaN(), 0); });
+    rejected([&] { first->at(std::numeric_limits<double>::infinity(), 0); });
+    rejected([&] { first->at(4, 0); });
+    rejected([&] { first->at(0, -1); });
     writeCrankExposureMap(path.string(), 25, {2, 1, 0.5f}, false);
     require(cache.load(path.string()) == first, "Map changed under an active render");
     cache.clear();

@@ -11,13 +11,13 @@
 
 namespace silentfilm {
 
-float CrankExposureMap::at(double frame, int offset, double hostFps) const
+float CrankExposureMap::at(double frame, int offset) const
 {
-    if (!std::isfinite(frame) || !std::isfinite(hostFps) || std::abs(hostFps - frameRate) > 0.002)
-        throw std::runtime_error("Crank Exposure: FPS карты и клипа не совпадают; retiming не поддержан");
+    if (!std::isfinite(frame)) throw std::runtime_error("Crank Exposure: неверное время кадра OFX");
     const double index = std::floor(frame + 0.5) + offset;
     if (index < 0 || index >= static_cast<double>(gains.size()))
-        throw std::runtime_error("Crank Exposure: кадр вне карты; проверь Exposure Map и Frame Offset");
+        throw std::runtime_error("Crank Exposure: кадр вне карты (index=" + std::to_string(index)
+            + ", count=" + std::to_string(gains.size()) + "); проверь Exposure Map и Frame Offset");
     return gains[static_cast<std::size_t>(index)];
 }
 

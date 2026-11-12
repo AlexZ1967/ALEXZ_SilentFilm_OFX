@@ -439,6 +439,9 @@ class Application:
         self.exposure_map_path.set_placeholder_text("Exposure Map — появится после расчёта")
         self.exposure_map_path.set_tooltip_text("Путь можно скопировать и выбрать в Exposure Map ноды SilentFilm Crank Exposure. Для Bake дополнительная нода не нужна.")
         outer.append(self.exposure_map_path)
+        self.import_status = self.label("")
+        self.import_status.set_tooltip_text("Последний результат импорта и привязки карты. Сохраняется при обновлении выделения. Назначение параметров не подтверждает успешную обработку кадра OFX.")
+        outer.append(self.import_status)
         outer.append(self.label("Exposure via OFX: карта назначается автоматически в Fusion → SilentFilm Crank Exposure. Затем Camera Optics → Negative → Print → Projector. При отказе API появится инструкция ручной настройки."))
 
     def preference_widgets(self):
@@ -896,6 +899,7 @@ class Application:
                                "Для нового расчёта выдели клип таймлайна и заново открой окно из меню Resolve.")
         request = self.numeric_request()
         self.exposure_map_path.set_text("")
+        self.import_status.set_text("")
         fps_mode = ("timeline", "source", "custom")[self.source_fps_mode.get_selected()]
         if not Path(self.args.helper).is_file():
             raise RuntimeError("Сначала собери native helper: " + self.args.helper)
@@ -1069,6 +1073,12 @@ class Application:
             self.context_change(self.placement, "set_selected", 1 if context.get("import_mode", "above") == "above" else 0)
             self.job.set_text(path)
             self.opened_job = Path(path)
+            import_file = self.opened_job / "resolve_import.json"
+            if import_file.exists():
+                imported = json.loads(import_file.read_text(encoding="utf-8"))
+                self.import_status.set_text("Последний импорт: " + imported.get("message", ""))
+            else:
+                self.import_status.set_text("")
             result_file = self.opened_job / "result.ini"
             if result_file.exists():
                 saved = read_ini(result_file)
@@ -1113,6 +1123,7 @@ class Application:
             if result.get("exposure_map_path"):
                 self.exposure_map_path.set_text(result["exposure_map_path"])
             self.status.set_text(result["message"])
+            self.import_status.set_text("Последний импорт: " + result["message"])
             if self.batch_active() and self.batch.current["state"] == "importing":
                 self.finish_batch_item("imported", result["message"])
             elif getattr(self, "batch", None) and self.batch.stopped and self.batch.current and self.batch.current.get("job") == str(directory):

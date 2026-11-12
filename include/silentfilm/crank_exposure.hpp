@@ -24,8 +24,8 @@ struct CrankExposureMap {
     double frameRate = 25;
     bool baked = false;
     std::vector<float> gains;
-    /** Resolve one output-frame gain, rejecting unsupported retiming or an incorrect offset. */
-    float at(double relativeFrame, int offset, double hostFrameRate) const;
+    /** Resolve a gain in output-frame units without treating host clip FPS metadata as retiming. */
+    float at(double relativeFrame, int offset) const;
 };
 
 /** Persist exact capture gains with explicit bake state and output timing. */

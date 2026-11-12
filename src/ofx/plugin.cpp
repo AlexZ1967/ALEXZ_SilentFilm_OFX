@@ -1500,7 +1500,7 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
                 const auto map = state.exposureMaps.load(path ? path : "");
                 double range[2]{};
                 sourceFrameRange(state.source, range);
-                gain = map->at(time - range[0], offset, clipFrameRate(state.source));
+                gain = map->at(time - range[0], offset);
             } catch (const Failure&) { throw; }
             catch (const std::runtime_error& error) { throw Failure(kOfxStatErrValue, error.what()); }
         }
@@ -1661,7 +1661,7 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 26, setHost, entry<EffectKind::CrankExposure>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 28, setHost, entry<EffectKind::CrankExposure>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 6, setHost, entry<EffectKind::Probe>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 25, setHost, entry<EffectKind::Camera>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 25, setHost, entry<EffectKind::Negative>},

@@ -898,7 +898,7 @@ class SavedJobUiState(unittest.TestCase):
             app_spec.loader.exec_module(app_module)
         app = app_module.Application.__new__(app_module.Application)
         app.running_job = app.future = None
-        for name in ("placement", "job", "timeline_label", "status", "numeric_request", "choose_path"):
+        for name in ("placement", "job", "timeline_label", "status", "numeric_request", "choose_path", "import_status"):
             setattr(app, name, Mock())
         app.values = {}
         with tempfile.TemporaryDirectory() as folder:
@@ -1064,7 +1064,7 @@ class BatchProcessing(unittest.TestCase):
             app_spec.loader.exec_module(module)
         app = module.Application.__new__(module.Application)
         app.batch = self.queue
-        for name in ("job", "progress", "batch_progress", "batch_label", "status", "submit", "exposure_map_path",
+        for name in ("job", "progress", "batch_progress", "batch_label", "status", "submit", "exposure_map_path", "import_status",
                      "update_source_fps_display", "update_source_mode", "guarded"):
             setattr(app, name, Mock())
         app.job.get_text.return_value = str(self.directory)
@@ -1085,6 +1085,7 @@ class BatchProcessing(unittest.TestCase):
         self.assertEqual(self.queue.current["state"], "importing")
         app.submit.assert_called_once()
         app.submit.call_args.args[1]({"message": "Импортировано"})
+        app.import_status.set_text.assert_called_with("Последний импорт: Импортировано")
         self.assertEqual(self.queue.index, 1)
         module.GLib.idle_add.assert_called_once_with(app.next_batch_item)
         app.update_job()
