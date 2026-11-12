@@ -1,6 +1,7 @@
 """Exchange JSON with Resolve from its bundled external Python interpreter."""
 
 import datetime
+import base64
 import json
 import math
 import os
@@ -9,6 +10,9 @@ import re
 import sys
 import subprocess
 import traceback
+import time
+import queue
+import threading
 
 
 # ResolvePython может не добавлять папку запущенного скрипта в пути импорта.
@@ -97,20 +101,32 @@ def item_snapshot(item):
             "fps": decimal(media.GetClipProperty("FPS")), "speed": speed.get("Percentage")}
 
 
-def timeline_source(project):
-    """Select exactly one video item and use its visible source range instead of searching a bin."""
-    timeline = check(project.GetCurrentTimeline(), "Открой таймлайн и выдели один видеоклип")
+def timeline_sources(project):
+    """Snapshot selected video instances in deterministic timeline order, ignoring linked audio."""
+    timeline = check(project.GetCurrentTimeline(), "Открой таймлайн и выдели видеоклипы")
     selected = [item for item in sequence(timeline.GetSelectedClips()) if item.GetType() == "video"]
-    check(len(selected) == 1, "Выдели ровно один видеоклип на таймлайне; связанное аудио можно оставить выделенным")
+    check(selected, "Выдели один или несколько видеоклипов на таймлайне")
     context = project_context(project)
-    target = item_snapshot(selected[0])
-    target.update(timeline_id=timeline.GetUniqueId(), timeline_name=timeline.GetName())
-    # Вход для cadence будет отрендерен Resolve на сетке таймлайна, не прочитан из raw.
-    count = target["end"] - target["start"]
-    context["target"] = target
-    context["source"] = {"path": target["path"], "name": target["name"], "fps": context["output_fps"],
-                         "clip_id": target["media_id"], "marks": {"in": 0, "out": count - 1}, "requires_bake": True}
-    return context
+    items, seen = [], set()
+    for item in selected:
+        if item.GetUniqueId() in seen:
+            continue
+        seen.add(item.GetUniqueId())
+        target = item_snapshot(item)
+        target.update(timeline_id=timeline.GetUniqueId(), timeline_name=timeline.GetName())
+        count = target["end"] - target["start"]
+        source = {"path": target["path"], "name": target["name"], "fps": context["output_fps"],
+                  "clip_id": target["media_id"], "marks": {"in": 0, "out": count - 1}, "requires_bake": True}
+        items.append(dict(context, target=target, source=source))
+    items.sort(key=lambda value: (value["target"]["start"], value["target"]["track_index"], value["target"]["item_id"]))
+    return {"items": items}
+
+
+def timeline_source(project):
+    """Retain the single-item API for historical callers."""
+    items = timeline_sources(project)["items"]
+    check(len(items) == 1, "Выдели ровно один видеоклип на таймлайне")
+    return items[0]
 
 
 def raw_source_range(target):
@@ -120,6 +136,26 @@ def raw_source_range(target):
           "Resolve не сообщил корректный In/Out исходного файла")
     return {"input": target["path"], "start_frame": start, "frame_count": end - start,
             "expected_source_fps": fps}
+
+
+def raw_timeline_frame(target, offset):
+    """Map a timeline-frame center into the trimmed source interval without changing duration."""
+    source = raw_source_range(target)
+    count = int(target["end"] - target["start"])
+    check(count > 0 and 0 <= offset < count, "Кадр вне монтажного диапазона")
+    # SourceEndFrame is exclusive. Integer arithmetic avoids rounding drift.
+    return source["start_frame"] + min(source["frame_count"] - 1,
+                                      ((2 * offset + 1) * source["frame_count"]) // (2 * count))
+
+
+def native_raw_request(target, timeline_fps):
+    """Read raw media directly while exposing exactly the selected timeline frame grid."""
+    source = raw_source_range(target)
+    frames = int(target["end"] - target["start"])
+    check(frames > 0 and math.isfinite(timeline_fps) and timeline_fps > 0, "Некорректная временная сетка таймлайна")
+    return {"input": source["input"], "start_frame": 0, "frame_count": frames,
+            "expected_source_fps": source["expected_source_fps"], "raw_start_frame": source["start_frame"],
+            "raw_frame_count": source["frame_count"], "timeline_input_fps": timeline_fps}
 
 
 def timeline_positions(timeline, exclude=None):
@@ -315,10 +351,9 @@ def inspect_baked_media(state, path):
 
 
 def direct_start(project, request):
-    """Start a detached Resolve item-frame export followed by a lossless intermediate encode."""
+    """Start a detached provider of processed frames requested by the native renderer."""
     directory = Path(request["job"]).resolve()
     check(directory.is_dir() and not (directory / "bake_state.json").exists(), "Для подготовки нужно новое задание")
-    check(Path("/usr/bin/ffmpeg").is_file(), "Для подготовки кадров установи пакет ffmpeg")
     helper = Path(request.get("helper", ""))
     check(helper.is_file(), "Не найден native helper; собери приложение")
     target = request["target"]
@@ -326,13 +361,16 @@ def direct_start(project, request):
     timeline, item = replacement_target(project, target, target["end"] - target["start"], fps, check_space=False)
     check(callable(getattr(item, "ExportFrame", None)), "Resolve не предоставляет TimelineItem.ExportFrame")
     profile = bake_profile(project, timeline, request.get("transfer_override"))
-    state = {"method": "item_frames", "state": "rendering", "project_id": project.GetUniqueId(),
+    raw = bool(request.get("ignore_processing", False))
+    check(not raw, "Use Raw Source должен использовать нативное чтение исходника")
+    state = {"method": "frame_provider", "state": "rendering", "project_id": project.GetUniqueId(),
+             "ignore_processing": raw,
              "target": target, "helper": str(helper.resolve()), "require_alpha": bool(request.get("require_alpha", False)),
              "frame_count": target["end"] - target["start"], "progress": 0, **profile}
     atomic_json(directory / "bake_state.json", state)
     try:
         with (directory / "resolve_frames.log").open("ab") as log:
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--direct-worker", str(directory)],
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--provider-worker", str(directory)],
                                        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     except Exception as error:
         state.update(state="error", error=str(error))
@@ -343,11 +381,126 @@ def direct_start(project, request):
     return state
 
 
+def provider_worker(directory):
+    """Serve item frames on demand while keeping Resolve objects inside its Python interpreter."""
+    state_path = directory / "bake_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    temporary = directory / "resolve_frame.png"
+    try:
+        import DaVinciResolveScript
+        from cadence_frame_provider import serve_frames
+        resolve = check(DaVinciResolveScript.scriptapp("Resolve"), "Нет подключения к Resolve")
+        project = check(resolve.GetProjectManager().GetCurrentProject(), "Открой исходный проект")
+        check(project.GetUniqueId() == state["project_id"], "Открой исходный проект")
+        _, item = replacement_target(project, state["target"], state["frame_count"], state["fps"], check_space=False)
+        transport, exports = None, 0
+        def export(index):
+            nonlocal item, transport, exports
+            check(not (directory / "cancel.request").exists(), "Получение кадров отменено")
+            if exports % 25 == 0:
+                current = resolve.GetProjectManager().GetCurrentProject()
+                check(current and current.GetUniqueId() == state["project_id"], "Проект Resolve изменился во время расчёта")
+                _, item = replacement_target(project, state["target"], state["frame_count"], state["fps"], check_space=False)
+            payload, transport = export_png_bytes(item, index, temporary, transport)
+            exports += 1
+            state["frame_transport"] = transport
+            return payload
+        serve_frames(directory, state, export)
+    except Exception as error:
+        traceback.print_exc(file=sys.stderr)
+        state.update(state="cancelled" if (directory / "cancel.request").exists() else "error", error=str(error), provider_active=False)
+        atomic_json(state_path, state)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def export_png_bytes(exporter, index, path, transport=None):
+    """Prefer in-memory PNG export; retain file export for hosts lacking encoded output."""
+    if transport != "file":
+        try:
+            reply = exporter.ExportFrame(index, {"outputType": "encodedString", "encodedImageFormat": "png", "maxDimension": 0})
+        except Exception:
+            if transport == "encoded":
+                raise
+            reply = None
+        if isinstance(reply, dict) and reply.get("success") and isinstance(reply.get("data"), str):
+            payload = base64.b64decode(reply["data"], validate=True)
+            check(payload[:8] == b"\x89PNG\r\n\x1a\n", "Resolve вернул некорректный PNG")
+            return payload, "encoded"
+        check(transport != "encoded", f"Resolve прервал получение кадра {index}: {reply}")
+    path.unlink(missing_ok=True)
+    reply = exporter.ExportFrame(index, {"outputType": "file", "filePath": str(path), "maxDimension": 0})
+    check(isinstance(reply, dict) and reply.get("success") and path.is_file(), f"Resolve не экспортировал кадр {index}: {reply}")
+    payload = path.read_bytes()
+    path.unlink()
+    check(payload[:8] == b"\x89PNG\r\n\x1a\n", "Resolve вернул некорректный PNG")
+    return payload, "file"
+
+
+class PngPipeWriter:
+    """Overlap serialized Resolve export with encoder writes using a bounded two-frame queue."""
+
+    def __init__(self, pipe, cancelled):
+        self.pipe, self.cancelled = pipe, cancelled
+        self.pending = queue.Queue(maxsize=2)
+        self.error = None
+        self.stopped = threading.Event()
+        self.worker = threading.Thread(target=self._write, daemon=True)
+        self.worker.start()
+
+    def _write(self):
+        try:
+            while not self.stopped.is_set():
+                try:
+                    payload = self.pending.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if payload is None:
+                    self.pipe.close()
+                    return
+                view = memoryview(payload)
+                while view:
+                    written = self.pipe.write(view)
+                    if not written:
+                        raise BrokenPipeError("Encoder stopped accepting frames")
+                    view = view[written:]
+        except Exception as error:
+            self.error = error
+        finally:
+            self.stopped.set()
+
+    def put(self, payload):
+        while True:
+            check(not self.cancelled(), "Подготовка отменена")
+            if self.error:
+                raise RuntimeError("FFmpeg прервал приём кадров; подробности в ffmpeg_frames.log") from self.error
+            check(not self.stopped.is_set(), "Поток записи кадров завершился раньше времени")
+            try:
+                self.pending.put(payload, timeout=0.1)
+                return
+            except queue.Full:
+                pass
+
+    def finish(self):
+        self.put(None)
+        while self.worker.is_alive():
+            check(not self.cancelled(), "Подготовка отменена")
+            self.worker.join(timeout=0.1)
+        if self.error:
+            raise RuntimeError("FFmpeg прервал приём кадров; подробности в ffmpeg_frames.log") from self.error
+
+    def abort(self):
+        self.stopped.set()
+        self.worker.join(timeout=5)
+
+
 def direct_worker(directory):
     """Read processed item frames through Resolve and stream PNGs to lossless FFV1."""
     state_path = directory / "bake_state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     encoder = None
+    pipe_writer = None
+    started = time.monotonic()
     frame_path = directory / "resolve_frame.png"
     try:
         import DaVinciResolveScript
@@ -361,37 +514,53 @@ def direct_worker(directory):
         for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH"):
             environment.pop(key, None)
         pixel_format = "gbrap16le" if state["require_alpha"] else "gbrp16le"
+        exporter = item.GetMediaPoolItem() if state.get("ignore_processing") else item
+        previous_index, previous_payload, transport = None, None, None
+        export_seconds = pipe_wait_seconds = 0.0
+        last_progress = time.monotonic()
         with (directory / "ffmpeg_frames.log").open("wb") as log:
             encoder = subprocess.Popen(["/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-f", "image2pipe",
                                         "-framerate", str(state["fps"]), "-vcodec", "png", "-i", "pipe:0",
-                                        "-an", "-c:v", "ffv1", "-level", "3", "-pix_fmt", pixel_format,
+                                        "-an", "-c:v", "ffv1", "-level", "3", "-threads", "4", "-slices", "4", "-slicecrc", "0", "-pix_fmt", pixel_format,
                                         "-y", str(output)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                        stderr=log, env=environment)
+            pipe_writer = PngPipeWriter(encoder.stdin, lambda: (directory / "cancel.request").exists())
             for offset in range(state["frame_count"]):
                 check(not (directory / "cancel.request").exists(), "Подготовка отменена")
                 if offset and offset % 25 == 0:
                     check(resolve.GetProjectManager().GetCurrentProject().GetUniqueId() == state["project_id"],
                           "Во время подготовки изменён проект Resolve")
                     _, item = replacement_target(project, target, state["frame_count"], state["fps"], check_space=False)
-                frame_path.unlink(missing_ok=True)
-                reply = item.ExportFrame(offset, {"outputType": "file", "filePath": str(frame_path), "maxDimension": 0})
-                check(isinstance(reply, dict) and reply.get("success") and frame_path.is_file() and frame_path.stat().st_size,
-                      f"Resolve не экспортировал кадр {offset}: {reply}")
+                    exporter = item.GetMediaPoolItem() if state.get("ignore_processing") else item
+                frame_index = raw_timeline_frame(target, offset) if state.get("ignore_processing") else offset
+                if frame_index == previous_index:
+                    payload = previous_payload
+                else:
+                    before = time.monotonic()
+                    payload, transport = export_png_bytes(exporter, frame_index, frame_path, transport)
+                    export_seconds += time.monotonic() - before
+                    previous_index, previous_payload = frame_index, payload
+                state["frame_transport"] = transport
+                if offset == 0 and state.get("ignore_processing"):
+                    # Raw keeps the original raster; timing always comes from the timeline.
+                    header = payload[:24]
+                    check(header[:8] == b"\x89PNG\r\n\x1a\n" and len(header) == 24, "Resolve не создал корректный PNG")
+                    state["width"] = int.from_bytes(header[16:20], "big")
+                    state["height"] = int.from_bytes(header[20:24], "big")
                 if state["require_alpha"]:
-                    with frame_path.open("rb") as image:
-                        header = image.read(26)
+                    header = payload[:26]
                     check(len(header) == 26 and header[:8] == b"\x89PNG\r\n\x1a\n" and header[25] in (4, 6),
                           "Resolve не предоставил PNG с прозрачностью; отключи alpha для непрозрачного клипа")
-                with frame_path.open("rb") as image:
-                    while chunk := image.read(1024 * 1024):
-                        try:
-                            encoder.stdin.write(chunk)
-                        except BrokenPipeError as error:
-                            raise RuntimeError("FFmpeg прервал приём кадров; подробности в ffmpeg_frames.log") from error
-                frame_path.unlink()
+                before = time.monotonic()
+                pipe_writer.put(payload)
+                pipe_wait_seconds += time.monotonic() - before
                 state["progress"] = int(95 * (offset + 1) / state["frame_count"])
-                atomic_json(state_path, state)
-            encoder.stdin.close()
+                if time.monotonic() - last_progress >= 0.5:
+                    state.update(export_seconds=round(export_seconds, 3), pipe_wait_seconds=round(pipe_wait_seconds, 3))
+                    atomic_json(state_path, state)
+                    last_progress = time.monotonic()
+            pipe_writer.finish()
+            state.update(export_seconds=round(export_seconds, 3), pipe_wait_seconds=round(pipe_wait_seconds, 3))
             while encoder.poll() is None:
                 if (directory / "cancel.request").exists():
                     encoder.terminate()
@@ -416,7 +585,10 @@ def direct_worker(directory):
                 encoder.wait()
         state.update(state="cancelled" if (directory / "cancel.request").exists() else "error", error=str(error))
     finally:
+        if pipe_writer:
+            pipe_writer.abort()
         frame_path.unlink(missing_ok=True)
+        state["preparation_seconds"] = round(time.monotonic() - started, 3)
         atomic_json(state_path, state)
 
 
@@ -682,8 +854,8 @@ def replace_result(project, pool, clip, target, count, fps, directory):
 
 
 def track_has_room(timeline, track, start, count):
-    """Require an enabled, unlocked video track with no overlap across the complete output interval."""
-    if timeline.GetIsTrackLocked("video", track) or not timeline.GetIsTrackEnabled("video", track):
+    """Require an unlocked video track with room, regardless of its visibility."""
+    if timeline.GetIsTrackLocked("video", track):
         return False
     end = start + count
     return all(float(item.GetEnd()) <= start or float(item.GetStart()) >= end
@@ -811,7 +983,7 @@ def import_result(project, request):
     if mode in ("replace", "above"):
         check(context.get("target"), "В задании нет привязки к выделенному клипу таймлайна")
         processing = context.get("source_processing")
-        check(processing == "raw_source_trim" or (processing in ("resolve_clip_bake", "resolve_item_frames") and context.get("baked_input")),
+        check(processing in ("raw_source_trim", "native_raw_timeline") or (processing in ("resolve_clip_bake", "resolve_item_frames", "resolve_raw_timeline_frames", "resolve_frame_provider") and context.get("baked_input")),
               "В задании не указан обработанный вход или явный режим исходника без обработок")
         if processing == "raw_source_trim":
             source = raw_source_range(context["target"])
@@ -819,6 +991,19 @@ def import_result(project, request):
                   and int(result.get("source_start_frame", -1)) == source["start_frame"]
                   and int(result.get("source_frame_count", -1)) == source["frame_count"],
                   "Результат не соответствует In/Out выбранного исходника")
+        if processing == "native_raw_timeline":
+            source = native_raw_request(context["target"], context["output_fps"])
+            check(Path(result.get("input", "")).resolve() == Path(source["input"]).resolve()
+                  and int(result.get("raw_start_frame", -1)) == source["raw_start_frame"]
+                  and int(result.get("raw_frame_count", -1)) == source["raw_frame_count"]
+                  and int(result.get("source_frame_count", -1)) == source["frame_count"]
+                  and abs(float(result.get("timeline_input_fps", 0)) - source["timeline_input_fps"]) < 0.002,
+                  "Результат не соответствует исходной подрезке и временной сетке таймлайна")
+        if processing == "resolve_frame_provider":
+            check(result.get("source_mode") == "resolve_frames"
+                  and Path(result.get("input", "")).resolve() == Path(context["baked_input"]).resolve()
+                  and int(result.get("source_frame_count", -1)) == context["target"]["end"]-context["target"]["start"],
+                  "Результат не соответствует прямому источнику кадров монтажного клипа")
         replacement_target(project, context["target"], count, fps, check_space=mode == "replace")
     pool = project.GetMediaPool()
     clip = import_prepared_media(pool, result, count, directory)
@@ -949,6 +1134,8 @@ def main():
         action = request["action"]
         if action == "timeline_source":
             result = timeline_source(project)
+        elif action == "timeline_sources":
+            result = timeline_sources(project)
         elif action == "context":
             result = project_context(project)
         elif action == "validate_target":
@@ -956,7 +1143,7 @@ def main():
             context = project_context(project)
             replacement_target(project, target, target["end"] - target["start"], context["output_fps"])
             if request.get("ignore_processing"):
-                context["raw_source"] = raw_source_range(target)
+                context["raw_source"] = native_raw_request(target, context["output_fps"])
             result = context
         elif action == "bake_start":
             result = bake_start(project, request)
@@ -980,7 +1167,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--direct-worker":
+    if len(sys.argv) == 3 and sys.argv[1] == "--provider-worker":
+        provider_worker(Path(sys.argv[2]).resolve())
+    elif len(sys.argv) == 3 and sys.argv[1] == "--direct-worker":
         direct_worker(Path(sys.argv[2]).resolve())
     else:
         main()

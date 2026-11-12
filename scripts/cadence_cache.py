@@ -92,6 +92,14 @@ def beneath(path, directory):
 
 def terminal_job(directory):
     """Allow cleanup only after native rendering has reached a terminal state."""
+    provider = directory / "bake_state.json"
+    if provider.exists():
+        try:
+            state = json.loads(provider.read_text(encoding="utf-8"))
+            if state.get("method") == "frame_provider" and state.get("provider_active"):
+                return False
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
     path = directory / "status.ini"
     if path.is_symlink() or not path.is_file():
         return False

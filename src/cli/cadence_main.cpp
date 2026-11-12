@@ -4,6 +4,7 @@
 
 #ifdef SILENTFILM_CLI_CUDA
 #include <cuda_runtime_api.h>
+#include "flow_cuda.hpp"
 #endif
 
 #include <algorithm>
@@ -105,9 +106,12 @@ struct Settings {
     std::string input, format = "prores", device = "cuda";
     std::string outputName;
     bool splitCamera = false;
+    bool frameProvider = false;
     std::string blurMode = "simple";
     double outputFps = 25, expectedSourceFps = 0, sourceFps = 0;
     std::int64_t start = 0, length = 0;
+    std::int64_t rawStart = 0, rawCount = 0;
+    double timelineInputFps = 0;
     std::size_t cacheBytes = 1024ULL * 1024 * 1024, gpuCacheBytes = 512ULL * 1024 * 1024;
     int gpu = 0;
     Transfer inputTransfer = Transfer::SRGB;
@@ -148,6 +152,9 @@ Settings parse(Values values)
         throw std::runtime_error("Blur mode must be simple or flow_integrated");
     s.outputName = get("output_name", "");
     s.input = get("input", "");
+    const auto sourceMode=get("source_mode","video");
+    if(sourceMode!="video" && sourceMode!="resolve_frames")throw std::runtime_error("Unknown source_mode");
+    s.frameProvider=sourceMode=="resolve_frames";
     if (s.input.empty() || !fs::is_regular_file(s.input)) throw std::runtime_error("Input must be a regular local media file");
     s.format = get("format", "prores"); s.device = get("device", "cuda");
     if (s.format != "prores" && s.format != "tiff") throw std::runtime_error("Select prores or tiff output");
@@ -163,6 +170,12 @@ Settings parse(Values values)
     s.sourceFps = scalar("source_fps", 0, 0, 120);
     if (s.sourceFps > 0 && s.sourceFps < 1) throw std::runtime_error("source_fps must be 0 (auto) or 1..120");
     s.start = integer("start_frame", 0, 0, 1000000000); s.length = integer("frame_count", 0, 0, 1000000000);
+    s.rawStart = integer("raw_start_frame", 0, 0, 1000000000);
+    s.rawCount = integer("raw_frame_count", 0, 0, 1000000000);
+    s.timelineInputFps = scalar("timeline_input_fps", 0, 0, 120);
+    if ((s.rawCount > 0 || s.timelineInputFps > 0) && !(s.rawCount > 0 && s.timelineInputFps >= 1 && s.length > 0 && s.start == 0))
+        throw std::runtime_error("Native raw mapping requires raw_frame_count, timeline_input_fps and timeline frame_count");
+    if(s.frameProvider && (s.rawCount || s.start || s.length<=0))throw std::runtime_error("Frame provider requires a complete timeline interval from frame zero");
     s.cacheBytes = static_cast<std::size_t>(integer("cache_mib", 1024, 32, 65536)) * 1024 * 1024;
     s.gpuCacheBytes = static_cast<std::size_t>(integer("gpu_cache_mib", 512, 32, 65536)) * 1024 * 1024;
     s.gpu = static_cast<int>(integer("gpu_index", 0, 0, 32));
@@ -275,6 +288,7 @@ class CudaRenderer {
     unsigned char* output_ = nullptr;
     std::map<std::int64_t, DeviceFrame> frames_;
     std::array<unsigned char*, maximumCameraExposureSamples> flowSamples_{};
+    std::unique_ptr<CudaFlowSampler> flowGpu_;
     int width_, height_;
     std::size_t bytes_, budget_;
 public:
@@ -287,6 +301,7 @@ public:
     }
     ~CudaRenderer() {
         if (!stream_) return;
+        flowGpu_.reset();
         for (auto& [index, frame] : frames_) cudaFreeAsync(frame.data, stream_);
         for (auto* data : flowSamples_) if (data) cudaFreeAsync(data, stream_);
         if (output_) cudaFreeAsync(output_, stream_);
@@ -295,6 +310,27 @@ public:
     void render(VideoReader& reader, const std::vector<SampleIndices>& indices, const CadenceSettings& c,
         const CameraOpticsParameters& optics, float gain, std::int64_t capture, std::vector<Pixel>& pixels,
         FlowSampler* flow) {
+        // Одна порция — одна экспозиция. Предыдущая уже завершена на stream;
+        // здесь можно безопасно уменьшить кэши при давлении на VRAM.
+        std::set<std::int64_t> needed;
+        for (const auto& p : indices) { needed.insert(p.left); if (p.mix > 0) needed.insert(p.right); }
+        for (std::size_t i=0;i<flowSamples_.size();++i) {
+            if (flowSamples_[i] && (i>=indices.size() || !flow || indices[i].mix<=0)) {
+                requireCuda(cudaFreeAsync(flowSamples_[i],stream_)); flowSamples_[i]=nullptr;
+            }
+        }
+        std::size_t freeBytes=0,totalBytes=0;
+        requireCuda(cudaMemGetInfo(&freeBytes,&totalBytes));
+        const std::size_t owned = frames_.size()*bytes_ + (flowGpu_ ? flowGpu_->cachedBytes() : 0);
+        const auto reserve = std::min<std::size_t>(totalBytes/10,512ULL*1024*1024);
+        const auto available = owned+freeBytes;
+        const auto cacheBudget = std::min(budget_, available>reserve ? available-reserve : 0);
+        const auto frameBudget = flow ? cacheBudget/2 : cacheBudget;
+        if (flowGpu_) flowGpu_->trimToBudget(cacheBudget/2);
+        for (auto it=frames_.begin();it!=frames_.end() && frames_.size()*bytes_>frameBudget;) {
+            if (!needed.count(it->first)) { requireCuda(cudaFreeAsync(it->second.data,stream_)); it=frames_.erase(it); }
+            else ++it;
+        }
         struct UploadLifetime {
             cudaStream_t stream;
             std::vector<std::shared_ptr<const SourceFrame>> frames;
@@ -323,11 +359,13 @@ public:
             if (flow && p.mix > 0) {
                 auto first = reader.get(p.left);
                 auto second = reader.get(p.right);
-                auto prepared = flow->sample(std::move(first), std::move(second), p.mix);
+                auto fields = flow->fields(std::move(first), std::move(second));
+                if (!flowGpu_) flowGpu_ = std::make_unique<CudaFlowSampler>(width_, height_, cacheBudget / 2, stream_);
                 if (!flowSamples_[i]) requireCuda(cudaMallocAsync(
                     reinterpret_cast<void**>(&flowSamples_[i]), bytes_, stream_));
-                uploads.push_back(std::move(prepared));
-                requireCuda(cudaMemcpyAsync(flowSamples_[i], uploads.back()->pixels.data(), bytes_, cudaMemcpyHostToDevice, stream_));
+                const auto left = image(p.left), right = image(p.right);
+                flowGpu_->sample(std::move(fields), reinterpret_cast<const Pixel*>(left.data), reinterpret_cast<const Pixel*>(right.data),
+                    p.mix, reinterpret_cast<Pixel*>(flowSamples_[i]));
                 samples[i] = {{flowSamples_[i], static_cast<std::ptrdiff_t>(width_) * static_cast<std::ptrdiff_t>(sizeof(Pixel)),
                     0, 0, width_, height_}, p.phase, {}, 0, p.weight};
             } else {
@@ -342,7 +380,8 @@ public:
         requireCuda(cudaMemcpyAsync(pixels.data(), output_, bytes_, cudaMemcpyDeviceToHost, stream_));
         // Это отдельный процесс: encoder на CPU должен получить уже законченный кадр.
         requireCuda(cudaStreamSynchronize(stream_));
-        while (frames_.size() > 1 && frames_.size() * bytes_ > budget_) {
+        if (flowGpu_) flowGpu_->releaseUploadsAfterSync();
+        while (frames_.size() > 1 && frames_.size() * bytes_ > frameBudget) {
             const auto oldest = std::min_element(frames_.begin(), frames_.end(), [](const auto& a, const auto& b) { return a.second.used < b.second.used; });
             requireCuda(cudaFreeAsync(oldest->second.data, stream_)); frames_.erase(oldest);
         }
@@ -352,20 +391,23 @@ public:
 
 void render(Job& job, const Settings& s)
 {
-    VideoReader reader(s.input, s.cacheBytes, s.inputTransfer, [&] { return job.cancelled(); });
+    const auto started = std::chrono::steady_clock::now();
+    VideoReader reader(s.input, s.cacheBytes, s.inputTransfer, [&] { return job.cancelled(); }, s.frameProvider);
     const double encodedFps = reader.fps();
-    const double fps = s.sourceFps > 0 ? s.sourceFps : encodedFps;
+    if (s.rawCount > 0) reader.setTimelineRange(s.rawStart, s.rawCount, s.length, s.timelineInputFps);
+    const double fps = s.sourceFps > 0 ? s.sourceFps : reader.fps();
     std::unique_ptr<FlowSampler> flow;
     if (s.blurMode == "flow_integrated") flow = std::make_unique<FlowSampler>(
         reader.width(), reader.height(), s.cacheBytes / 2, [&] { return job.cancelled(); });
     job.status["blur_mode"] = s.blurMode;
-    job.status["flow_backend"] = flow ? "opencv_cpu_farneback_warp" : "none";
+    job.status["flow_backend"] = flow ? (s.device == "cuda" ? "opencv_cpu_farneback_cuda_warp" : "opencv_cpu_farneback_warp") : "none";
     if (s.expectedSourceFps > 0 && std::abs(encodedFps - s.expectedSourceFps) > 0.002)
         throw std::runtime_error("Media Pool FPS differs from encoded source FPS; render a CFR intermediate first");
     job.status["source_fps"] = number(fps); job.status["output_fps"] = number(s.outputFps);
     job.status["encoded_source_fps"] = number(encodedFps);
     job.status["width"] = std::to_string(reader.width()); job.status["height"] = std::to_string(reader.height());
     job.status["backend"] = s.device;
+    if (s.device == "cuda") job.status["gpu_memory_strategy"] = "streamed_exposures_adaptive_caches";
     job.status["target_fps_min"] = number(s.camera.crank.minimumFps);
     job.status["target_fps_max"] = number(s.camera.crank.maximumFps);
     job.status["fps_drift_strength"] = number(s.camera.crank.rateVariation);
@@ -493,7 +535,24 @@ void render(Job& job, const Settings& s)
     result["source_frame_count"] = std::to_string(length); result["source_duration"] = number(static_cast<double>(length) / fps);
     result["output_duration"] = number(static_cast<double>(written) / s.outputFps);
     result["output_transfer"] = "srgb"; result["audio"] = "none";
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    result["native_seconds"] = number(elapsed);
+    result["flow_seconds"] = number(flow ? flow->elapsedSeconds() : 0);
+    if (s.device == "cuda") result["flow_cpu_estimation_seconds"] = number(flow ? flow->elapsedSeconds() : 0);
+    result["render_fps"] = number(elapsed > 0 ? written / elapsed : 0);
     result["processing"] = s.splitCamera ? "capture_rgb" : "full_camera";
+    result["source_mode"] = s.frameProvider ? "resolve_frames" : "video";
+    if(s.frameProvider) {
+        const auto stats=reader.frameReadStats();
+        result["resolve_frame_requests"]=std::to_string(stats.requests);
+        result["resolve_wait_seconds"]=number(stats.waitSeconds);
+        result["png_decode_seconds"]=number(stats.decodeSeconds);
+    }
+    if (s.rawCount > 0) {
+        result["raw_start_frame"] = std::to_string(s.rawStart);
+        result["raw_frame_count"] = std::to_string(s.rawCount);
+        result["timeline_input_fps"] = number(s.timelineInputFps);
+    }
     result["clip_name"] = s.outputName.empty() ? "cadence" : s.outputName;
     result["message"] = "Готово: один выходной кадр на физическую экспозицию";
     atomicValues(job.directory / "result.ini", result);
@@ -507,7 +566,7 @@ int main(int argc, char** argv)
 {
     std::signal(SIGINT, signalHandler); std::signal(SIGTERM, signalHandler);
     if (argc == 2 && std::string(argv[1]) == "--capabilities") {
-        std::cout << "{\"camera_parameter_schema\":2,\"max_blur_samples\":" << maximumCameraExposureSamples;
+        std::cout << "{\"camera_parameter_schema\":2,\"native_timeline_source\":true,\"resolve_frame_provider\":true,\"max_blur_samples\":" << maximumCameraExposureSamples;
 #ifdef SILENTFILM_CADENCE_OPENCV
         std::cout << ",\"optical_flow\":true,\"flow_backend\":\"opencv_cpu_farneback_warp\"}\n";
 #else

@@ -17,6 +17,7 @@ struct SourceFrame {
 };
 
 struct PixelAspectRatio { int numerator = 1; int denominator = 1; };
+struct FrameReadStats { std::uint64_t requests = 0; double waitSeconds = 0, decodeSeconds = 0; };
 
 /** Decode CFR SDR Rec.709 source frames with a bounded cache, preserving native frame indices. */
 class VideoReader {
@@ -24,16 +25,19 @@ class VideoReader {
     std::unique_ptr<Impl> impl_;
 public:
     VideoReader(const std::string& path, std::size_t cacheBytes, Transfer inputTransfer,
-        std::function<bool()> cancelled);
+        std::function<bool()> cancelled, bool frameProvider = false);
     ~VideoReader();
     int width() const;
     int height() const;
     double fps() const;
     PixelAspectRatio pixelAspectRatio() const;
     bool hasAlphaChannel() const;
+    FrameReadStats frameReadStats() const;
     std::int64_t frameCountHint() const;
     std::int64_t decodedCount() const;
     bool eof() const;
+    void setTimelineRange(std::int64_t sourceStart, std::int64_t sourceCount,
+        std::int64_t timelineCount, double timelineFps);
     std::int64_t locate(std::int64_t index);
     std::shared_ptr<const SourceFrame> get(std::int64_t index);
 };

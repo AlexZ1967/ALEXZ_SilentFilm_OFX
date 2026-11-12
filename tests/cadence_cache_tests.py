@@ -34,6 +34,13 @@ class CacheFixture(unittest.TestCase):
 class ManagedStorage(CacheFixture):
     """Protect project boundaries and active or referenced generations."""
 
+    def test_active_frame_provider_blocks_cleanup_after_native_error(self):
+        directory = self.job(state="error")
+        (directory / "bake_state.json").write_text(json.dumps({"method": "frame_provider", "provider_active": True}), encoding="utf-8")
+        self.assertFalse(cache.terminal_job(directory))
+        (directory / "bake_state.json").write_text(json.dumps({"method": "frame_provider", "provider_active": False}), encoding="utf-8")
+        self.assertTrue(cache.terminal_job(directory))
+
     def test_project_identity_separates_equal_names_and_rename_reuses_directory(self):
         first = self.job()
         second = self.job(dict(self.context, project_id="project-B"))

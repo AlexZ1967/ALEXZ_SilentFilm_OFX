@@ -63,6 +63,26 @@ foreach(format tiff prores)
         endif()
     endif()
 endforeach()
+# Прямое чтение raw: исходные15 кадров отображаются в20 timeline кадров,
+# без промежуточного PNG/FFV1, с сохранением точных исходных пикселей.
+if(DEFINED MEDIA_TEST)
+    execute_process(COMMAND "${MEDIA_TEST}" "${root}/source.mkv" RESULT_VARIABLE mapped)
+    if(NOT mapped EQUAL 0)
+        message(FATAL_ERROR "Native timeline reader regression failed")
+    endif()
+endif()
+set(job "${root}/native-raw")
+file(MAKE_DIRECTORY "${job}")
+file(WRITE "${job}/request.ini" "schema=1\nprocessing=capture_rgb\ninput=${root}/source.mkv\nformat=prores\ndevice=cpu\noutput_fps=25\nstart_frame=0\nframe_count=20\nraw_start_frame=5\nraw_frame_count=15\ntimeline_input_fps=25\nfps_min=20\nfps_max=20\nvariation=0\nirregularity=0\nmotion_blur=0\nshake=0\n")
+execute_process(COMMAND "${HELPER}" --job "${job}/request.ini" RESULT_VARIABLE rendered ERROR_VARIABLE error)
+if(NOT rendered EQUAL 0)
+    message(FATAL_ERROR "Native raw export failed: ${error}")
+endif()
+file(STRINGS "${job}/result.ini" count REGEX "^frame_count=")
+file(STRINGS "${job}/result.ini" raw_count REGEX "^raw_frame_count=")
+if(NOT count STREQUAL "frame_count=16" OR NOT raw_count STREQUAL "raw_frame_count=15")
+    message(FATAL_ERROR "Raw source changed timeline duration: ${count}, ${raw_count}")
+endif()
 # Сохраняем физическое соотношение пикселей в MOV после пересчёта кадров.
 execute_process(COMMAND "${FFMPEG}" -hide_banner -loglevel error -f lavfi
     -i "testsrc2=size=64x48:rate=25:duration=1,setsar=4/3" -an -c:v ffv1 -pix_fmt yuv444p

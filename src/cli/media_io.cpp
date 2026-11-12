@@ -21,6 +21,15 @@ extern "C" {
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <climits>
+#include <cstddef>
+#include <cerrno>
+#include <cstring>
+#include <chrono>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 namespace silentfilm::offline {
 namespace {
@@ -93,6 +102,9 @@ struct VideoReader::Impl {
     AVStream* stream = nullptr;
     int streamIndex = -1, width = 0, height = 0;
     double fps = 0;
+    std::int64_t sourceStart = 0, sourceCount = 0, timelineCount = 0, timelineDecoded = 0;
+    double timelineFps = 0;
+    bool timelineEnded = false;
     std::int64_t nextIndex = 0, firstPts = AV_NOPTS_VALUE;
     bool draining = false, ended = false;
     bool decodedAlpha = false;
@@ -104,8 +116,103 @@ struct VideoReader::Impl {
     std::deque<Raw> raw;
     std::map<std::int64_t, std::weak_ptr<const SourceFrame>> converted;
     std::vector<std::uint16_t> rgba;
+    int remote = -1;
+    std::int64_t remoteCount = 0;
+    FrameReadStats remoteStats;
 
-    ~Impl() { sws_freeContext(scaler); av_packet_free(&packet); avcodec_free_context(&codec); avformat_close_input(&format); }
+    ~Impl() { if(remote>=0) ::close(remote); sws_freeContext(scaler); av_packet_free(&packet); avcodec_free_context(&codec); avformat_close_input(&format); }
+
+    void transfer(void* data, std::size_t bytes, bool sending) {
+        auto* position = static_cast<unsigned char*>(data);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+        while(bytes) {
+            if(cancelled()) throw std::runtime_error("Cancelled");
+            if(std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Resolve frame request timed out");
+            pollfd descriptor{remote, static_cast<short>(sending ? POLLOUT : POLLIN), 0};
+            const int ready = ::poll(&descriptor,1,200);
+            if(ready<0 && errno==EINTR) continue;
+            if(ready<0) throw std::runtime_error("Resolve frame socket poll failed");
+            if(!ready) continue;
+            const auto amount = sending ? ::send(remote,position,bytes,MSG_NOSIGNAL) : ::recv(remote,position,bytes,0);
+            if(amount<0 && errno==EINTR) continue;
+            if(amount<=0) throw std::runtime_error("Resolve frame provider disconnected; see resolve_frames.log");
+            position+=amount;bytes-=static_cast<std::size_t>(amount);
+        }
+    }
+
+    void fetchRemote(std::int64_t index) {
+        const auto requested=std::chrono::steady_clock::now();
+        ++remoteStats.requests;
+        unsigned char request[8];
+        for(int i=0;i<8;++i)request[i]=static_cast<unsigned char>(static_cast<std::uint64_t>(index)>>(8*i));
+        transfer(request,sizeof(request),true);
+        unsigned char header[9];transfer(header,sizeof(header),false);
+        std::uint64_t size=0;
+        for(int i=0;i<8;++i)size|=static_cast<std::uint64_t>(header[i+1])<<(8*i);
+        const auto limit=header[0] ? 8192ULL : static_cast<std::uint64_t>(width)*height*8+1024*1024;
+        if(size==0 || size>limit || size>INT_MAX)throw std::runtime_error("Invalid Resolve frame payload size");
+        std::vector<unsigned char> payload(static_cast<std::size_t>(size));
+        transfer(payload.data(),payload.size(),false);
+        const auto received=std::chrono::steady_clock::now();
+        remoteStats.waitSeconds+=std::chrono::duration<double>(received-requested).count();
+        if(header[0])throw std::runtime_error("Resolve frame error: "+std::string(payload.begin(),payload.end()));
+        avcodec_flush_buffers(codec);
+        av_packet_unref(packet);
+        check(av_new_packet(packet,static_cast<int>(payload.size())),"Allocate PNG packet");
+        std::memcpy(packet->data,payload.data(),payload.size());
+        // Каждый ExportFrame — самостоятельное изображение. Без KEY PNG decoder
+        // может применить поддержку delta P-frames и прибавить предыдущий кадр.
+        packet->flags |= AV_PKT_FLAG_KEY;
+        check(avcodec_send_packet(codec,packet),"Send Resolve PNG");
+        check(avcodec_receive_frame(codec,decoded.get()),"Decode Resolve PNG");
+        if(decoded->width!=width || decoded->height!=height)throw std::runtime_error("Resolve frame dimensions changed or differ from timeline");
+        const auto* description=av_pix_fmt_desc_get(static_cast<AVPixelFormat>(decoded->format));
+        decodedAlpha=description && (description->flags&AV_PIX_FMT_FLAG_ALPHA);
+        if(decoded->sample_aspect_ratio.num>0 && decoded->sample_aspect_ratio.den>0)sampleAspect=decoded->sample_aspect_ratio;
+        auto* clone=av_frame_clone(decoded.get());if(!clone)throw std::bad_alloc();
+        AvFrame owned(clone,[](AVFrame* p){av_frame_free(&p);});
+        const int bytes=av_image_get_buffer_size(static_cast<AVPixelFormat>(decoded->format),width,height,1);
+        check(bytes,"Measure Resolve PNG");
+        raw.push_back({index,std::move(owned),static_cast<std::size_t>(bytes)});rawBytes+=bytes;
+        while(raw.size()>1 && rawBytes>budget){rawBytes-=raw.front().bytes;raw.pop_front();}
+        av_frame_unref(decoded.get());
+        remoteStats.decodeSeconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-received).count();
+    }
+
+    void openRemote(const std::string& path) {
+        std::ifstream input(path);
+        std::string line;
+        if(!std::getline(input,line) || line!="SILENTFILM_FRAME_SOURCE_V1")throw std::runtime_error("Invalid frame source metadata");
+        std::map<std::string,std::string> values;
+        while(std::getline(input,line)) {
+            const auto split=line.find('=');
+            if(split!=std::string::npos)values[line.substr(0,split)]=line.substr(split+1);
+        }
+        width=std::stoi(values.at("width"));height=std::stoi(values.at("height"));fps=std::stod(values.at("fps"));
+        remoteCount=std::stoll(values.at("frame_count"));
+        const auto name=values.at("socket_name"),token=values.at("token");
+        sockaddr_un address{};address.sun_family=AF_UNIX;
+        if(width<=0||height<=0||width>32768||height>32768||!std::isfinite(fps)||fps<=0||remoteCount<=0||remoteCount>1000000000
+            ||name.empty()||name.size()+1>sizeof(address.sun_path)||token.size()!=64)
+            throw std::runtime_error("Invalid Resolve frame source configuration");
+        remote=::socket(AF_UNIX,SOCK_STREAM,0);
+        if(remote<0)throw std::runtime_error("Cannot create Resolve frame socket");
+        // Linux abstract socket avoids the 108-byte limit for project directory paths.
+        std::memcpy(address.sun_path+1,name.data(),name.size());
+        if(::connect(remote,reinterpret_cast<sockaddr*>(&address),offsetof(sockaddr_un,sun_path)+1+name.size())<0)
+            throw std::runtime_error("Resolve frame provider is unavailable; start a new capture");
+        transfer(const_cast<char*>(token.data()),token.size(),true);
+        char acknowledgement[4];transfer(acknowledgement,4,false);
+        if(std::string(acknowledgement,4)!="SF01")throw std::runtime_error("Resolve frame provider authentication failed");
+        const auto* decoder=avcodec_find_decoder(AV_CODEC_ID_PNG);
+        if(!decoder)throw std::runtime_error("FFmpeg PNG decoder unavailable");
+        codec=avcodec_alloc_context3(decoder);if(!codec)throw std::bad_alloc();
+        codec->thread_count=1;
+        check(avcodec_open2(codec,decoder,nullptr),"Open Resolve PNG decoder");
+        packet=av_packet_alloc();if(!packet)throw std::bad_alloc();
+        rgba.resize(static_cast<std::size_t>(width)*height*4);
+        fetchRemote(0);
+    }
 
     void open(const std::string& path) {
         format = avformat_alloc_context();
@@ -200,16 +307,36 @@ struct VideoReader::Impl {
     }
 
     std::int64_t locate(std::int64_t index) {
+        if(remoteCount) {
+            if(index>=remoteCount)ended=true;
+            nextIndex=remoteCount;
+            return std::clamp<std::int64_t>(index,0,remoteCount-1);
+        }
         if (index < 0) index = 0;
         while (!ended && nextIndex <= index) advance();
         if (nextIndex == 0) throw std::runtime_error("Source contains no video frames");
         return std::min(index, nextIndex - 1);
     }
 
+    std::int64_t sourceIndex(std::int64_t index) const {
+        index = std::clamp<std::int64_t>(index, 0, timelineCount - 1);
+        return sourceStart + std::min(sourceCount - 1, ((2 * index + 1) * sourceCount) / (2 * timelineCount));
+    }
+
+    std::int64_t locateTimeline(std::int64_t index) {
+        if (index >= timelineCount) timelineEnded = true;
+        index = std::clamp<std::int64_t>(index, 0, timelineCount - 1);
+        const auto source = sourceIndex(index);
+        if (locate(source) != source) throw std::runtime_error("Timeline In/Out exceeds decoded source length");
+        timelineDecoded = std::max(timelineDecoded, index + 1);
+        return index;
+    }
+
     std::shared_ptr<const SourceFrame> get(std::int64_t index) {
         index = locate(index);
         const auto cached = converted.find(index);
         if (cached != converted.end()) if (auto existing = cached->second.lock()) return existing;
+        if(remoteCount && std::none_of(raw.begin(),raw.end(),[index](const Raw& p){return p.index==index;}))fetchRemote(index);
         const auto it = std::find_if(raw.begin(), raw.end(), [index](const Raw& p) { return p.index == index; });
         if (it == raw.end()) throw std::runtime_error("Source frame fell outside the decode cache; increase cache_mib");
         const auto* input = it->pixels.get();
@@ -243,24 +370,34 @@ struct VideoReader::Impl {
     }
 };
 
-VideoReader::VideoReader(const std::string& path, std::size_t bytes, Transfer transfer, std::function<bool()> cancelled)
+VideoReader::VideoReader(const std::string& path, std::size_t bytes, Transfer transfer, std::function<bool()> cancelled, bool provider)
     : impl_(std::make_unique<Impl>()) {
-    impl_->budget = bytes; impl_->inputTransfer = transfer; impl_->cancelled = std::move(cancelled); impl_->open(path);
+    impl_->budget = bytes; impl_->inputTransfer = transfer; impl_->cancelled = std::move(cancelled);
+    if(provider)impl_->openRemote(path);else impl_->open(path);
 }
 VideoReader::~VideoReader() = default;
 int VideoReader::width() const { return impl_->width; }
 int VideoReader::height() const { return impl_->height; }
-double VideoReader::fps() const { return impl_->fps; }
+double VideoReader::fps() const { return impl_->timelineCount ? impl_->timelineFps : impl_->fps; }
 PixelAspectRatio VideoReader::pixelAspectRatio() const {
     const auto aspect = impl_->sampleAspect;
     return aspect.num > 0 && aspect.den > 0 ? PixelAspectRatio{aspect.num, aspect.den} : PixelAspectRatio{};
 }
 bool VideoReader::hasAlphaChannel() const { return impl_->decodedAlpha; }
-std::int64_t VideoReader::frameCountHint() const { return impl_->stream->nb_frames; }
-std::int64_t VideoReader::decodedCount() const { return impl_->nextIndex; }
-bool VideoReader::eof() const { return impl_->ended; }
-std::int64_t VideoReader::locate(std::int64_t index) { return impl_->locate(index); }
-std::shared_ptr<const SourceFrame> VideoReader::get(std::int64_t index) { return impl_->get(index); }
+FrameReadStats VideoReader::frameReadStats() const { return impl_->remoteStats; }
+std::int64_t VideoReader::frameCountHint() const { return impl_->timelineCount ? impl_->timelineCount : (impl_->remoteCount ? impl_->remoteCount : impl_->stream->nb_frames); }
+std::int64_t VideoReader::decodedCount() const { return impl_->timelineCount ? impl_->timelineDecoded : impl_->nextIndex; }
+bool VideoReader::eof() const { return impl_->timelineCount ? impl_->timelineEnded : impl_->ended; }
+std::int64_t VideoReader::locate(std::int64_t index) { return impl_->timelineCount ? impl_->locateTimeline(index) : impl_->locate(index); }
+std::shared_ptr<const SourceFrame> VideoReader::get(std::int64_t index) {
+    if (impl_->timelineCount) index = impl_->sourceIndex(impl_->locateTimeline(index));
+    return impl_->get(index);
+}
+void VideoReader::setTimelineRange(std::int64_t start, std::int64_t count, std::int64_t frames, double fps) {
+    if (impl_->nextIndex || start < 0 || count <= 0 || frames <= 0 || count > 1000000000 || frames > 1000000000
+        || !std::isfinite(fps) || fps <= 0) throw std::runtime_error("Invalid native timeline source mapping");
+    impl_->sourceStart = start; impl_->sourceCount = count; impl_->timelineCount = frames; impl_->timelineFps = fps;
+}
 
 struct FrameWriter::Impl {
     std::filesystem::path directory, path;

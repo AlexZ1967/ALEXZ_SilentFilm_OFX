@@ -206,6 +206,28 @@ class TimelineSelection(unittest.TestCase):
         item.GetLinkedItems.return_value = []
         return item
 
+    def test_batch_selection_keeps_distinct_edits_and_ignores_linked_audio(self):
+        self.timeline.GetSelectedClips.return_value = [self.following, self.audio, self.original, self.original]
+        items = bridge.timeline_sources(self.project)["items"]
+        self.assertEqual([item["target"]["item_id"] for item in items], ["selected", "following"])
+        self.assertEqual([item["target"]["source_start"] for item in items], [40, 140])
+        self.assertEqual([item["source"]["marks"] for item in items], [{"in": 0, "out": 99}] * 2)
+        self.assertEqual(items[0]["source"]["clip_id"], items[1]["source"]["clip_id"])
+        with self.assertRaisesRegex(RuntimeError, "ровно один"):
+            bridge.timeline_source(self.project)
+
+    def test_batch_selection_orders_tracks_at_the_same_start(self):
+        upper = self.make_item("upper", 100, 150, 5, 55)
+        upper.GetTrackTypeAndIndex.return_value = ["video", 2]
+        self.timeline.GetSelectedClips.return_value = [upper, self.original]
+        items = bridge.timeline_sources(self.project)["items"]
+        self.assertEqual([item["target"]["item_id"] for item in items], ["selected", "upper"])
+
+    def test_batch_selection_rejects_audio_only(self):
+        self.timeline.GetSelectedClips.return_value = [self.audio]
+        with self.assertRaisesRegex(RuntimeError, "видеоклип"):
+            bridge.timeline_sources(self.project)
+
     def test_raw_range_uses_source_frames_not_timeline_duration(self):
         """Raw 24-fps input must not inherit a longer 25-fps timeline frame count."""
         target = dict(self.target, source_start=12, source_end=252, fps=24, start=100, end=351)
@@ -218,6 +240,85 @@ class TimelineSelection(unittest.TestCase):
         """An invalid source range must not silently render the complete file."""
         with self.assertRaisesRegex(RuntimeError, "In/Out"):
             bridge.raw_source_range(dict(self.target, source_start=40, source_end=40))
+
+    def test_png_memory_transport_does_not_write_files(self):
+        """Encoded export must pass the same PNG bytes directly to the encoder."""
+        import base64
+        payload = b"\x89PNG\r\n\x1a\n" + b"frame"
+        exporter = Mock()
+        exporter.ExportFrame.return_value = {"success": True, "data": base64.b64encode(payload).decode("ascii")}
+        path = self.directory / "frame.png"
+        data, transport = bridge.export_png_bytes(exporter, 12, path)
+        self.assertEqual((data, transport), (payload, "encoded"))
+        self.assertFalse(path.exists())
+        exporter.ExportFrame.assert_called_once_with(12, {"outputType": "encodedString", "encodedImageFormat": "png", "maxDimension": 0})
+
+    def test_png_file_fallback_is_explicit_and_reused(self):
+        """Unsupported encoded export is probed once, then file transport is retained."""
+        payload = b"\x89PNG\r\n\x1a\n" + b"frame"
+        exporter = Mock()
+        def export(index, options):
+            if options["outputType"] == "encodedString":
+                return {"success": False}
+            Path(options["filePath"]).write_bytes(payload)
+            return {"success": True}
+        exporter.ExportFrame.side_effect = export
+        path = self.directory / "frame.png"
+        data, transport = bridge.export_png_bytes(exporter, 12, path)
+        self.assertEqual((data, transport), (payload, "file"))
+        bridge.export_png_bytes(exporter, 13, path, transport)
+        self.assertEqual(exporter.ExportFrame.call_count, 3)
+        self.assertFalse(path.exists())
+
+    def test_raw_frames_preserve_timeline_count_and_trim(self):
+        """97 source frames must fill the same 101 timeline frames as the processed path."""
+        target = dict(self.target, source_start=140, source_end=237, fps=24, start=146, end=247)
+        frames = [bridge.raw_timeline_frame(target, offset) for offset in range(101)]
+        self.assertEqual(len(frames), 101)
+        self.assertEqual((frames[0], frames[-1]), (140, 236))
+        self.assertEqual(set(frames), set(range(140, 237)))
+        self.assertEqual(frames, sorted(frames))
+
+    def test_native_raw_request_keeps_both_clocks_separate(self):
+        """Native decode validates encoded FPS while cadence receives the unchanged timeline grid."""
+        target = dict(self.target, source_start=140, source_end=237, fps=24, start=146, end=247)
+        request = bridge.native_raw_request(target, 25)
+        self.assertEqual((request["start_frame"], request["frame_count"]), (0,101))
+        self.assertEqual((request["raw_start_frame"], request["raw_frame_count"]), (140,97))
+        self.assertEqual(request["timeline_input_fps"],25)
+        self.assertEqual(request["expected_source_fps"],24)
+
+    def test_encoder_queue_preserves_order_and_flushes_before_finish(self):
+        """The producer can overlap encoding without reordering or dropping PNG bytes."""
+        class Pipe:
+            def __init__(self): self.data=bytearray(); self.closed=False
+            def write(self, value):
+                self.data.extend(value[:2])
+                return min(2,len(value))
+            def close(self): self.closed=True
+        pipe=Pipe()
+        writer=bridge.PngPipeWriter(pipe, lambda:False)
+        try:
+            for frame in (b"first",b"second",b"third"):
+                writer.put(frame)
+            writer.finish()
+            self.assertEqual(pipe.data,b"firstsecondthird")
+            self.assertTrue(pipe.closed)
+            self.assertEqual(writer.pending.maxsize,2)
+        finally:
+            writer.abort()
+
+    def test_encoder_queue_propagates_write_failure(self):
+        """A stopped encoder must not leave a full producer queue waiting forever."""
+        pipe=Mock()
+        pipe.write.side_effect=BrokenPipeError("stopped")
+        writer=bridge.PngPipeWriter(pipe, lambda:False)
+        try:
+            with self.assertRaisesRegex(RuntimeError,"FFmpeg"):
+                writer.put(b"frame")
+                writer.finish()
+        finally:
+            writer.abort()
 
     def test_selection_uses_trim_of_instance_not_whole_file(self):
         """Two edits must retain distinct source/record ranges and bake from frame zero."""
@@ -316,6 +417,7 @@ class TimelineSelection(unittest.TestCase):
         after = self.make_item("after", 240, 300, 0, 59)
         tracks = {1: self.video, 2: [before, after], 3: []}
         self.timeline.GetTrackCount.side_effect = lambda kind: 3 if kind == "video" else 1 if kind == "audio" else 0
+        self.timeline.GetIsTrackEnabled.side_effect = lambda kind, track: track != 2
         self.timeline.GetItemListInTrack.side_effect = lambda kind, index: tracks[index] if kind == "video" else [self.audio]
         def append(infos):
             info = infos[0]
@@ -330,6 +432,7 @@ class TimelineSelection(unittest.TestCase):
         self.assertFalse(result["created_track"])
         self.timeline.AddTrack.assert_not_called()
         self.timeline.DeleteClips.assert_not_called()
+        self.timeline.SetTrackEnable.assert_not_called()
 
     def test_above_track_search_checks_locks_and_full_output_duration(self):
         """A gap fitting the old source duration may still be too short for the prepared result."""
@@ -340,7 +443,7 @@ class TimelineSelection(unittest.TestCase):
         self.timeline.GetItemListInTrack.side_effect = lambda kind, track: [occupied] if track == 3 else []
         self.assertEqual(bridge.available_above_track(self.timeline, self.target, 140), 4)
         self.timeline.GetIsTrackEnabled.side_effect = lambda kind, track: track != 4
-        self.assertEqual(bridge.available_above_track(self.timeline, self.target, 140), 5)
+        self.assertEqual(bridge.available_above_track(self.timeline, self.target, 140), 4)
         self.timeline.AddTrack.assert_not_called()
 
 
@@ -399,7 +502,7 @@ class ProcessedBake(unittest.TestCase):
             worker.return_value.pid = 1234
             result = bridge.direct_start(self.project, {"job": str(self.directory), "target": self.target,
                                                         "helper": str(self.helper), "require_alpha": False})
-        self.assertEqual(result["method"], "item_frames")
+        self.assertEqual(result["method"], "frame_provider")
         self.assertEqual(result["frame_count"], 100)
         self.project.AddRenderJob.assert_not_called()
         self.project.StartRendering.assert_not_called()
@@ -712,6 +815,36 @@ class CameraParameterMapping(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "таймлайн"):
             resolve("timeline", 36, {"output_fps": 30}, snapshot)
 
+    def test_loading_existing_preset_does_not_replace_dropdown_model(self):
+        """Loading after Factory Reset must not enqueue new selection notifications."""
+        app = self.app.Application.__new__(self.app.Application)
+        app.preferences = Mock()
+        app.preferences.names.return_value = ["My preset"]
+        app._preset_names = ["My preset"]
+        app._preferences_loading = False
+        app.preset_list = Mock()
+        app.preset_list.get_selected.return_value = 1
+        app.preset_name = Mock()
+        app.refresh_presets("My preset")
+        app.preset_list.set_model.assert_not_called()
+        app.preset_list.set_selected.assert_not_called()
+        self.assertFalse(app._preferences_loading)
+
+    def test_repeated_preset_notification_is_idempotent(self):
+        """GTK may deliver a pending notification after the preset is already applied."""
+        app = self.app.Application.__new__(self.app.Application)
+        app.running_job = app.future = app.resume_job = None
+        app.preferences = Mock()
+        app.preferences.names.return_value = ["My preset"]
+        app.preferences.selected = "My preset"
+        app._preference_dirty = False
+        app.preset_list = Mock()
+        app.preset_list.get_selected.return_value = 1
+        app.apply_preferences = Mock()
+        app.select_preset()
+        app.preferences.set_current.assert_not_called()
+        app.apply_preferences.assert_not_called()
+
     def test_groups_cover_each_numeric_control_once(self):
         fields = [item[0] for item in self.app.Application.FIELDS]
         grouped = [key for _, keys in self.app.Application.FIELD_GROUPS for key in keys]
@@ -723,7 +856,7 @@ class CameraParameterMapping(unittest.TestCase):
         app.running_job = app.future = app.opened_job = app.resume_job = None
         app.load_timeline_source = Mock()
         app.start()
-        app.load_timeline_source.assert_called_once_with(after=app.start_selected)
+        app.load_timeline_source.assert_called_once_with(after=app.start_selection)
 
     def test_clip_bounds_and_output_rate_are_not_editable_controls(self):
         fields = {item[0] for item in self.app.Application.FIELDS}
@@ -735,6 +868,9 @@ class CameraParameterMapping(unittest.TestCase):
         self.assertEqual(interval({"target": {"start": 100, "end": 148},
                                    "marks": {"in": 12, "out": 200}}),
                          {"start_frame": 0, "frame_count": 48})
+        snapshot = {"target": {"start": 146, "end": 247, "source_start": 140, "source_end": 237, "fps": 24}}
+        self.assertEqual(interval(snapshot, raw=True), interval(snapshot, raw=False))
+        self.assertEqual(interval(snapshot, raw=True), {"start_frame": 0, "frame_count": 101})
         with self.assertRaises(ValueError):
             interval({"marks": {"in": 12, "out": 47}})
         with self.assertRaises(ValueError):
@@ -754,6 +890,114 @@ class CameraParameterMapping(unittest.TestCase):
         app.source_fps_mode.get_selected.return_value = 2
         app.values["source_fps"].get_text.return_value = "48"
         self.assertEqual(app.read_preference("source_fps"), 48)
+
+
+class BatchProcessing(unittest.TestCase):
+    """Protect sequential imports, frozen trims and cancellation between clip jobs."""
+
+    def setUp(self):
+        from cadence_batch import BatchQueue
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.items = [{"project_id": "P", "target": {"item_id": key, "source_start": start},
+                       "source": {"name": key}} for key, start in (("A", 12), ("B", 90), ("C", 150))]
+        self.queue = BatchQueue(self.items, {"seed": 17}, self.directory)
+
+    def test_snapshots_survive_selection_changes_and_same_media_trims(self):
+        self.items[0]["target"]["source_start"] = 999
+        self.items.clear()
+        self.queue.begin()
+        self.assertEqual(self.queue.current["snapshot"]["target"]["source_start"], 12)
+        self.queue.complete(self.directory / "A", "imported")
+        self.assertEqual(self.queue.current["snapshot"]["target"]["source_start"], 90)
+        report = json.loads(self.queue.path.read_text(encoding="utf-8"))
+        self.assertEqual(report["index"], 1)
+        self.assertEqual(report["settings"], {"seed": 17})
+        self.assertEqual([entry["state"] for entry in report["clips"]], ["imported", "pending", "pending"])
+
+    def test_failure_preserves_completed_results_and_skips_remaining_clips(self):
+        self.queue.begin()
+        self.queue.complete("A", "imported")
+        self.queue.begin()
+        self.queue.stop("Ошибка импорта")
+        self.assertFalse(self.queue.active)
+        self.assertEqual([entry["state"] for entry in self.queue.entries], ["imported", "error", "skipped"])
+        self.queue.complete("B", "imported")
+        self.assertEqual(self.queue.index, 1)
+        with self.assertRaises(RuntimeError):
+            self.queue.begin()
+
+    def make_app(self):
+        app_spec = importlib.util.spec_from_file_location("cadence_batch_ui_test", Path(__file__).resolve().parents[1] / "scripts/cadence_app.py")
+        module = importlib.util.module_from_spec(app_spec)
+        with patch.dict(sys.modules, {"gi": Mock(), "gi.repository": Mock(), "cadence_resolve_bridge": bridge}):
+            app_spec.loader.exec_module(module)
+        app = module.Application.__new__(module.Application)
+        app.batch = self.queue
+        for name in ("job", "progress", "batch_progress", "batch_label", "status", "submit",
+                     "update_source_fps_display", "update_source_mode", "guarded"):
+            setattr(app, name, Mock())
+        app.job.get_text.return_value = str(self.directory)
+        app.running_job = app.process = app.future = app.baking_job = app.imported_job = None
+        app.job_target = {"item_id": "A"}
+        app.auto_pending = True
+        app.active_import_mode = "above"
+        return module, app
+
+    def test_next_clip_waits_for_import_and_old_result_cannot_finish_next_clip(self):
+        module, app = self.make_app()
+        self.queue.begin()
+        (self.directory / "status.ini").write_text("state=complete\n", encoding="utf-8")
+        (self.directory / "result.ini").write_text("state=complete\n", encoding="utf-8")
+        app.update_job()
+        app.update_job()
+        self.assertEqual(self.queue.index, 0)
+        self.assertEqual(self.queue.current["state"], "importing")
+        app.submit.assert_called_once()
+        app.submit.call_args.args[1]({"message": "Импортировано"})
+        self.assertEqual(self.queue.index, 1)
+        module.GLib.idle_add.assert_called_once_with(app.next_batch_item)
+        app.update_job()
+        self.assertEqual(self.queue.current["state"], "pending")
+        self.assertEqual(self.queue.index, 1)
+        app.next_batch_item()
+        app.job.set_text.assert_called_with("")
+        self.assertEqual(app.source_snapshot["target"]["item_id"], "B")
+        app.guarded.assert_called_once_with(app.start_selected)
+
+    def test_auto_import_off_advances_after_render_without_resolve_import(self):
+        module, app = self.make_app()
+        self.queue.begin()
+        app.auto_pending = False
+        (self.directory / "status.ini").write_text("state=complete\n", encoding="utf-8")
+        (self.directory / "result.ini").write_text("state=complete\n", encoding="utf-8")
+        app.update_job()
+        self.assertEqual(self.queue.entries[0]["state"], "rendered")
+        app.submit.assert_not_called()
+        module.GLib.idle_add.assert_called_once_with(app.next_batch_item)
+
+    def test_cancel_before_next_launch_keeps_remaining_clips_untouched(self):
+        module, app = self.make_app()
+        self.queue.begin()
+        app.cancel()
+        self.assertFalse(self.queue.active)
+        self.assertEqual([entry["state"] for entry in self.queue.entries], ["cancelled", "skipped", "skipped"])
+        app.next_batch_item()
+        app.guarded.assert_not_called()
+        app.submit.assert_not_called()
+
+    def test_failed_native_launch_releases_busy_state_and_cancels_provider(self):
+        module, app = self.make_app()
+        app.args = Mock(helper="/missing/silentfilm_cadence")
+        app.running_job = app.baking_job = self.directory
+        with patch.object(module.subprocess, "Popen", side_effect=OSError("Нет исполняемого файла")):
+            with self.assertRaisesRegex(OSError, "исполняемого"):
+                app.launch_native(self.directory, {"seed": 17})
+        self.assertIsNone(app.running_job)
+        self.assertIsNone(app.baking_job)
+        self.assertFalse(app.auto_pending)
+        self.assertTrue((self.directory / "cancel.request").exists())
 
 
 if __name__ == "__main__":

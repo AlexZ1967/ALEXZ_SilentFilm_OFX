@@ -55,7 +55,7 @@ def child_environment():
     return environment
 
 
-def require_flow_support(helper, mode):
+def require_flow_support(helper, mode, raw=False):
     """Validate helper parameter support and flow before exporting processed source frames."""
     try:
         result = subprocess.run([str(helper), "--capabilities"], capture_output=True, text=True,
@@ -66,8 +66,12 @@ def require_flow_support(helper, mode):
         if capabilities.get("camera_parameter_schema", 0) < 2 or capabilities.get("max_blur_samples", 0) < 17:
             raise ValueError("Outdated camera parameter support")
         supported = capabilities["optical_flow"] is True
+        if raw and capabilities.get("native_timeline_source") is not True:
+            raise ValueError("Outdated native timeline source support")
+        if not raw and capabilities.get("resolve_frame_provider") is not True:
+            raise ValueError("Outdated direct Resolve frame provider support")
     except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError("Нужна актуальная сборка native helper Cadence 0.14 с поддержкой выбора source_fps и 17 отсчётов. Пересобери проект.") from error
+        raise RuntimeError("Нужна актуальная сборка native helper Cadence с поддержкой временной сетки таймлайна, выбора source_fps и 17 отсчётов. Пересобери проект.") from error
     if mode == "flow_integrated" and not supported:
         raise RuntimeError("Эта сборка Cadence не поддерживает оптический поток. Установи libopencv-dev, повтори конфигурацию CMake и сборку. Затем переоткрой окно Cadence.")
 
@@ -98,10 +102,6 @@ def capture_range(snapshot, raw=False):
     snapshot = snapshot or {}
     target = snapshot.get("target")
     if target:
-        if raw:
-            from cadence_resolve_bridge import raw_source_range
-            source = raw_source_range(target)
-            return {"start_frame": source["start_frame"], "frame_count": source["frame_count"]}
         count = int(target["end"] - target["start"])
         if count <= 0:
             raise ValueError("Пустой диапазон выбранного клипа таймлайна")
@@ -152,6 +152,8 @@ class Application:
         self.next_source_refresh = 0
         self.context = {}
         self.source_snapshot = None
+        self.selection_items = []
+        self.batch = None
         self.job_target = None
         self.process = None
         self.running_job = None
@@ -204,6 +206,7 @@ class Application:
         try:
             action()
         except Exception as error:
+            self.stop_batch(str(error))
             self.status.set_text("Ошибка: " + str(error))
             self.message(str(error), Gtk.MessageType.ERROR)
 
@@ -272,9 +275,13 @@ class Application:
         title = self.label("Hand-Crank Camera Cadence")
         title.add_css_class("title-2")
         outer.append(title)
+        self.batch_label = self.label("Можно выделить несколько видеоклипов для последовательной обработки.")
+        outer.append(self.batch_label)
+        self.batch_progress = Gtk.ProgressBar(show_text=True)
+        outer.append(self.batch_progress)
         outer.append(self.label("Одна экспозиция → один кадр показа. Связанные с ручкой выдержка и экспозиция запекаются в Cadence."))
         self.ignore_processing = Gtk.CheckButton(label="Use Raw Source (In/Out Only)", active=True)
-        self.ignore_processing.set_tooltip_text("Не учитывать цветокоррекцию, OFX, Fusion, трансформации и изменение скорости. Читать подрезанный участок исходного файла. Частоту интерпретации задаёт source_fps_mode. Гамму входа выбери по исходнику. По умолчанию включено; сохраняется в настройках и пресетах.")
+        self.ignore_processing.set_tooltip_text("Не учитывать обработки клипа. Кадры исходника приводятся к монтажному диапазону и FPS таймлайна; длительность входа одинакова в обоих режимах. Частоту интерпретации задаёт source_fps_mode. Гамму входа выбери по исходнику. По умолчанию включено; сохраняется в настройках и пресетах.")
         self.ignore_processing.connect("toggled", lambda widget: self.guarded(self.update_source_mode))
         outer.append(self.ignore_processing)
         scroll = Gtk.ScrolledWindow(vexpand=True)
@@ -284,7 +291,8 @@ class Application:
         scroll.set_child(form)
         presets = Gtk.Grid(column_spacing=10, row_spacing=8)
         form.append(presets)
-        self.preset_list = Gtk.DropDown.new_from_strings(["Custom"] + self.preferences.names())
+        self._preset_names = self.preferences.names()
+        self.preset_list = Gtk.DropDown.new_from_strings(["Custom"] + self._preset_names)
         self.preset_list.set_hexpand(True)
         self.preset_list.set_enable_search(True)
         self.preset_list.set_tooltip_text("Пресет содержит параметры съёмки и режим source_fps. В timeline/source FPS читается заново из текущего источника, в custom восстанавливается ручное значение. Размеры и In/Out не меняются.")
@@ -305,7 +313,7 @@ class Application:
         source = Gtk.Grid(column_spacing=10, row_spacing=8)
         form.append(source)
         source.attach(self.label("Selected Timeline Clip", False), 0, 0, 1, 1)
-        self.timeline_label = self.label("Выдели один видеоклип на Edit; приложение загрузит его исходник и диапазон.")
+        self.timeline_label = self.label("Выдели видеоклипы на Edit; приложение загрузит их монтажные диапазоны.")
         source.attach(self.timeline_label, 1, 0, 2, 1)
         self.root = self.entry(self.args.root)
         self.root.set_tooltip_text("Корень хранения результатов SilentFilm. Внутри создаются папка проекта и папки клипов с cadence и уникальным идентификатором. Сохраняется в настройках и пресетах.")
@@ -400,7 +408,7 @@ class Application:
         self.preserve_alpha.set_tooltip_text("Для непрозрачного видео можно выключить. Без alpha прозрачные области запекутся на чёрном фоне.")
         form.append(self.preserve_alpha)
         form.append(self.label("При сокращении останется промежуток. Длинному результату нужно свободное место. Перед заменой создаётся копия таймлайна."))
-        form.append(self.label("После «Calculate»: Resolve передаёт кадры выбранного клипа, затем рассчитывается каденс. Проверь цвет и эффекты результата в Resolve."))
+        form.append(self.label("Кадры с обработками запрашиваются у Resolve по мере расчёта каденса. Во время расчёта не меняй обработки выбранного клипа."))
         actions = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=8, row_spacing=8)
         actions.set_max_children_per_line(5)
         outer.append(actions)
@@ -412,7 +420,7 @@ class Application:
             actions.insert(widget, -1)
         self.progress = Gtk.ProgressBar(show_text=True)
         outer.append(self.progress)
-        self.status = self.label("Выдели один видеоклип на таймлайне. В Resolve включи External scripting → Local.")
+        self.status = self.label("Выдели один или несколько видеоклипов на таймлайне. В Resolve включи External scripting → Local.")
         self.status.set_selectable(True)
         outer.append(self.status)
         paths = Gtk.Grid(column_spacing=10, row_spacing=8)
@@ -466,8 +474,14 @@ class Application:
         previous = self._preferences_loading
         self._preferences_loading = True
         try:
-            self.preset_list.set_model(Gtk.StringList.new(["Custom"] + names))
-            self.preset_list.set_selected(names.index(selected) + 1 if selected in names else 0)
+            # Замена модели из notify::selected повторно уведомляет GTK о выборе
+            # после выхода из обработчика. При загрузке значений список не меняется.
+            if names != self._preset_names:
+                self._preset_names = list(names)
+                self.preset_list.set_model(Gtk.StringList.new(["Custom"] + names))
+            index = names.index(selected) + 1 if selected in names else 0
+            if self.preset_list.get_selected() != index:
+                self.preset_list.set_selected(index)
             if selected:
                 self.preset_name.set_text(selected)
         finally:
@@ -545,7 +559,7 @@ class Application:
 
     def select_preset(self):
         """Apply a named effect preset immediately, leaving all clip timing metadata intact."""
-        if self.running_job or self.future or self.resume_job:
+        if self.running_job or self.future or self.resume_job or self.batch_active():
             raise RuntimeError("Дождись завершения задания перед выбором пресета")
         index = self.preset_list.get_selected()
         names = self.preferences.names()
@@ -555,13 +569,15 @@ class Application:
             self.preferences.set_current(self._draft_preferences)
             return
         name = names[index - 1]
+        if self.preferences.selected == name and not self._preference_dirty:
+            return
         self.preferences.set_current(self.preferences.preset(name), selected=name)
         self.apply_preferences(self.preferences.current)
         self.preference_status.set_text(f"Пресет «{name}» применён. Размеры и диапазон клипа не менялись; автоматические FPS берутся из текущего источника.")
 
     def save_preset(self):
         """Save a named preset, asking before replacing an existing name."""
-        if self.running_job or self.future or self.resume_job:
+        if self.running_job or self.future or self.resume_job or self.batch_active():
             raise RuntimeError("Дождись завершения задания перед сохранением пресета")
         name = self.preferences.validate_name(self.preset_name.get_text())
         values = self.snapshot_preferences()
@@ -576,7 +592,7 @@ class Application:
 
     def factory_reset(self):
         """Reset only persistent effect settings, preserving named presets and source metadata."""
-        if self.running_job or self.future or self.resume_job:
+        if self.running_job or self.future or self.resume_job or self.batch_active():
             raise RuntimeError("Дождись завершения задания перед сбросом настроек")
         self.preferences.reset()
         self.apply_preferences(self.preferences.current)
@@ -616,34 +632,87 @@ class Application:
         self.future = (self.executor.submit(self.bridge, request), callback, error_callback)
 
     def load_timeline_source(self, quiet=False, after=None):
-        """Bind the current video selection to the job without a Media Pool search."""
-        if self.running_job or self.future:
+        """Read all selected video instances without changing the running queue."""
+        if self.running_job or self.future or self.batch_active():
             if quiet:
                 return
             raise RuntimeError("Дождись завершения текущей операции")
         def received(result):
-            source = result["source"]
-            if quiet and self.source_snapshot and all(self.context.get(key) == value for key, value in result.items() if key != "source"):
+            items = result.get("items", [result])
+            if quiet and self.source_snapshot and self.selection_items == items:
                 return
+            self.selection_items = items
+            result = items[0]
+            source = result["source"]
             self.context = {key: value for key, value in result.items() if key != "source"}
             self.source_snapshot = dict(source, **self.context)
-            self.job_target = None
-            self.resume_job = None
-            self.opened_job = None
+            self.job_target = self.resume_job = self.opened_job = None
             self.placement.set_sensitive(True)
             target = result["target"]
             self.timeline_label.set_text(f'{result["project_name"]} / {target["timeline_name"]}: {source["name"]}, V{target["track_index"]}, кадры {target["start"]}–{target["end"] - 1}')
-            self.status.set_text("Клип выбран, рендер ещё не запущен. «Calculate»: обработка клипа в Resolve → каденс → размещение результата.")
+            self.batch_label.set_text(f"Выбрано видеоклипов: {len(items)}. Общие настройки применяются ко всем.")
+            self.status.set_text("Нажми Calculate для последовательной обработки выделенных клипов.")
             self.update_source_mode()
             if after:
                 after()
         def failed(error):
             self.source_snapshot = None
-            self.timeline_label.set_text("Выдели ровно один видеоклип на таймлайне.")
+            self.selection_items = []
+            self.timeline_label.set_text("Выдели один или несколько видеоклипов на таймлайне.")
             self.range_label.set_text("Source Range: No Selection")
             self.status.set_text(str(error))
         self.next_source_refresh = time.monotonic() + 5
-        self.submit({"action": "timeline_source"}, received, failed if quiet else None)
+        self.submit({"action": "timeline_sources"}, received, failed if quiet else None)
+
+    def batch_active(self):
+        """Include gaps between individual jobs in the busy state."""
+        return bool(getattr(self, "batch", None) and self.batch.active)
+
+    def start_selection(self):
+        """Freeze the selected instances once before starting a sequential queue."""
+        self.batch = None
+        if len(self.selection_items) <= 1:
+            self.start_selected()
+            return
+        from cadence_batch import BatchQueue
+        self.batch = BatchQueue(self.selection_items, self.snapshot_preferences(), self.root.get_text())
+        self.next_batch_item()
+
+    def next_batch_item(self):
+        """Start one saved item without consulting the changing UI selection."""
+        if not self.batch_active():
+            return False
+        self.batch.begin()
+        result = self.batch.current["snapshot"]
+        self.context = {key: value for key, value in result.items() if key != "source"}
+        self.source_snapshot = dict(result["source"], **self.context)
+        self.job_target = self.resume_job = self.opened_job = None
+        self.process = None
+        self.job.set_text("")
+        self.progress.set_fraction(0.0)
+        self.batch_label.set_text(f'Клип {self.batch.index + 1}/{len(self.batch.entries)}: {result["source"]["name"]}')
+        self.update_source_mode()
+        self.guarded(self.start_selected)
+        return False
+
+    def finish_batch_item(self, outcome, message=""):
+        """Advance only after rendering and the requested import have finished."""
+        if not self.batch_active():
+            return
+        self.batch.complete(self.job.get_text(), outcome, message)
+        if self.batch_active():
+            GLib.idle_add(self.next_batch_item)
+        else:
+            self.batch_progress.set_fraction(1.0)
+            self.batch_progress.set_text(f"{len(self.batch.entries)}/{len(self.batch.entries)} завершено")
+            self.batch_label.set_text(f"Очередь завершена: {len(self.batch.entries)} клипов. Отчёт: {self.batch.path}")
+
+    def stop_batch(self, message, state="error"):
+        """Preserve completed results and leave remaining clips untouched."""
+        if self.batch_active():
+            self.batch.stop(message, state)
+            self.auto_pending = False
+            self.batch_label.set_text(f"Очередь остановлена: {message}. Отчёт: {self.batch.path}")
 
     def update_source_mode(self):
         """Refresh read-only source-range metadata for the selected processing mode."""
@@ -654,7 +723,7 @@ class Application:
             capture_range(self.source_snapshot, raw=True)
             if self.transfer.get_selected() == 0:
                 self.context_change(self.transfer, "set_selected", 1)
-            self.status.set_text("Будет прочитан исходный файл с выбранным In/Out, без обработок клипа; интерпретацию кадров задаёт source_fps_mode.")
+            self.status.set_text("Исходные кадры без обработок будут приведены к In/Out и FPS таймлайна. Длительность входа не изменится.")
         self.update_range_display()
 
     def select_root(self):
@@ -663,7 +732,7 @@ class Application:
 
     def clean_cache(self, scope="project"):
         """Preview current-project garbage and require confirmation of the concrete deletion list."""
-        if self.running_job or self.future or self.resume_job:
+        if self.running_job or self.future or self.resume_job or self.batch_active():
             raise RuntimeError("Дождись завершения задания перед очисткой кэша")
         root = str(Path(self.preferences.validate({"output_folder": self.root.get_text()})["output_folder"]).expanduser().resolve())
         def planned(plan):
@@ -714,7 +783,7 @@ class Application:
         except (ValueError, RuntimeError, KeyError, TypeError):
             self.range_label.set_text("Source Range: Unavailable")
             return
-        if snapshot.get("target") and not raw:
+        if snapshot.get("target"):
             target = snapshot["target"]
             self.range_label.set_text(f'Timeline In: {target["start"]} | Out: {target["end"] - 1} | Frames: {interval["frame_count"]}')
         else:
@@ -732,7 +801,7 @@ class Application:
         """Refresh automatic FPS values without persisting the previous clip's metadata."""
         mode = ("timeline", "source", "custom")[self.source_fps_mode.get_selected()]
         widget = self.values["source_fps"]
-        busy = bool(self.running_job or self.future or self.resume_job)
+        busy = bool(self.running_job or self.future or self.resume_job or self.batch_active())
         self.source_fps_mode.set_sensitive(not busy)
         widget.set_editable(mode == "custom" and not busy)
         metadata = self.source_snapshot or self.context
@@ -786,11 +855,11 @@ class Application:
 
     def start(self):
         """Refresh the actual timeline selection immediately before creating a new capture."""
-        if self.running_job or self.future:
+        if self.running_job or self.future or self.batch_active():
             raise RuntimeError("Дождись завершения текущей операции")
         if self.opened_job or self.resume_job:
             return self.start_selected()
-        self.load_timeline_source(after=self.start_selected)
+        self.load_timeline_source(after=self.start_selection)
 
     def start_selected(self):
         """Create an isolated request and start the native renderer without a shell."""
@@ -816,7 +885,7 @@ class Application:
         fps_mode = ("timeline", "source", "custom")[self.source_fps_mode.get_selected()]
         if not Path(self.args.helper).is_file():
             raise RuntimeError("Сначала собери native helper: " + self.args.helper)
-        require_flow_support(self.args.helper, request["blur_mode"])
+        require_flow_support(self.args.helper, request["blur_mode"], raw=self.ignore_processing.get_active())
         snapshot = self.source_snapshot
         if self.job_target and not snapshot:
             raise RuntimeError("Для нового расчёта заново выбери клип таймлайна. Готовое задание можно импортировать без пересчёта.")
@@ -829,6 +898,8 @@ class Application:
             if request["start_frame"] != 0 or request["frame_count"] != expected_count:
                 raise RuntimeError("Для выбранного монтажного клипа используется ровно его подрезанный диапазон; загрузи клип заново")
         def launch(context):
+            if getattr(self, "batch", None) and self.batch.stopped:
+                return
             if snapshot and snapshot.get("project_id") != context.get("project_id"):
                 raise RuntimeError("Проект изменился. Обнови источники из Resolve")
             timeline_fps = source_interpretation_fps("timeline", 0, context, snapshot)
@@ -848,11 +919,14 @@ class Application:
             context["target"] = target
             from cadence_cache import create_job
             directory = create_job(root, context, context["source_name"])
+            if self.batch_active():
+                self.batch.current["job"] = str(directory)
+                self.batch.save()
             request["output_name"] = cadence_name(context["source_name"])
             context["import_mode"] = mode
             if target:
                 context["target"] = target
-                context["source_processing"] = "raw_source_trim" if ignore_processing else "resolve_item_frames"
+                context["source_processing"] = "native_raw_timeline" if ignore_processing else "resolve_frame_provider"
             (directory / "app_context.json").write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
             self.running_job = directory
             self.job_target = target
@@ -863,16 +937,15 @@ class Application:
             self.bake_cancel_requested = False
             (root / "last_app_job.json").write_text(json.dumps({"directory": str(directory)}), encoding="utf-8")
             if target and not ignore_processing:
-                context["source_processing"] = "resolve_item_frames"
                 (directory / "app_context.json").write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
                 (directory / "pending_native.json").write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
                 self.baking_job = directory
                 self.process = None
                 self.submit({"action": "direct_start", "job": str(directory), "target": target,
                              "transfer_override": transfer_override, "require_alpha": self.preserve_alpha.get_active(),
-                             "helper": self.args.helper},
+                             "ignore_processing": ignore_processing, "helper": self.args.helper},
                             self.receive_bake, self.bake_error)
-                self.status.set_text("1/2: Resolve передаёт кадры выбранного клипа…")
+                self.status.set_text("Подключение к источнику кадров Resolve…")
             else:
                 self.launch_native(directory, request)
         validation = {"action": "validate_target", "target": target, "ignore_processing": ignore_processing}
@@ -881,12 +954,19 @@ class Application:
 
     def launch_native(self, directory, request):
         """Start C++/CUDA only after the processed input is complete."""
-        write_ini(directory / "request.ini", request)
-        with (directory / "render.log").open("wb") as log:
-            self.process = subprocess.Popen([self.args.helper, "--job", str(directory / "request.ini")],
-                                            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                            env=child_environment(), start_new_session=True)
-        stage = "2/2: каденс" if self.baking_job else "Каденс"
+        try:
+            write_ini(directory / "request.ini", request)
+            with (directory / "render.log").open("wb") as log:
+                self.process = subprocess.Popen([self.args.helper, "--job", str(directory / "request.ini")],
+                                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                                env=child_environment(), start_new_session=True)
+        except Exception:
+            # Ошибка запуска не должна оставлять окно в состоянии вечного расчёта.
+            self.running_job = self.baking_job = None
+            self.auto_pending = False
+            (directory / "cancel.request").write_text("cancel\n", encoding="utf-8")
+            raise
+        stage = "Каденс с кадрами Resolve по запросу" if request.get("source_mode") == "resolve_frames" else ("2/2: каденс" if self.baking_job else "Каденс")
         self.baking_job = None
         self.progress.set_fraction(0.0)
         self.status.set_text(stage + " — запущен нативный расчёт; прогресс обновляется автоматически.")
@@ -894,6 +974,7 @@ class Application:
     def bake_error(self, error):
         """Keep render ownership recoverable after an RPC or project-switch error."""
         self.auto_pending = False
+        self.stop_batch(str(error))
         self.next_bake_poll = time.monotonic() + 5
         state_file = self.baking_job / "bake_state.json" if self.baking_job else None
         state = json.loads(state_file.read_text(encoding="utf-8")) if state_file and state_file.exists() else {}
@@ -910,7 +991,7 @@ class Application:
         self.last_bake_error = None
         if phase == "rendering":
             self.progress.set_fraction(max(0.0, min(0.99, float(state.get("progress", 0)) / 100)))
-            self.status.set_text(f'1/2: Resolve — обработка выбранного клипа, {state.get("progress", 0)}%.')
+            self.status.set_text("Подключение источника кадров Resolve…" if state.get("method") == "frame_provider" else f'1/2: Resolve — обработка выбранного клипа, {state.get("progress", 0)}%.')
             self.next_bake_poll = time.monotonic() + 1
             return
         directory = self.baking_job
@@ -918,6 +999,8 @@ class Application:
             request = json.loads((directory / "pending_native.json").read_text(encoding="utf-8"))
             request.update(input=state["input"], start_frame=0, frame_count=state["frame_count"],
                            input_transfer=state["input_transfer"], expected_source_fps=state["fps"])
+            if state.get("source_mode") == "resolve_frames":
+                request["source_mode"] = "resolve_frames"
             context_file = directory / "app_context.json"
             context = json.loads(context_file.read_text(encoding="utf-8"))
             context["baked_input"] = state["input"]
@@ -935,9 +1018,15 @@ class Application:
         self.baking_job = self.running_job = None
         self.auto_pending = False
         self.status.set_text("Подготовка Resolve остановлена: " + state.get("error", phase or "неизвестный статус"))
+        self.stop_batch(state.get("error", phase or "Подготовка остановлена"))
 
     def cancel(self):
         """Request cooperative cancellation without killing a Resolve process."""
+        if self.batch_active():
+            self.stop_batch("Отменено пользователем", "cancelled")
+            if not self.running_job:
+                self.status.set_text("Очередь остановлена; текущая операция импорта может завершиться.")
+                return
         if self.baking_job:
             self.bake_cancel_requested = True
             self.auto_pending = False
@@ -956,9 +1045,10 @@ class Application:
 
     def open_job(self):
         """Reopen persistent status after the app was closed."""
-        if self.running_job or self.future:
+        if self.running_job or self.future or self.batch_active():
             raise RuntimeError("Сначала дождись текущего задания")
         def selected(path):
+            self.batch = None
             context_file = Path(path) / "app_context.json"
             context = json.loads(context_file.read_text(encoding="utf-8")) if context_file.exists() else {}
             self.job_target = context.get("target")
@@ -1003,6 +1093,11 @@ class Application:
         def imported(result):
             self.imported_job = str(directory)
             self.status.set_text(result["message"])
+            if self.batch_active() and self.batch.current["state"] == "importing":
+                self.finish_batch_item("imported", result["message"])
+            elif getattr(self, "batch", None) and self.batch.stopped and self.batch.current and self.batch.current.get("job") == str(directory):
+                self.batch.current.update(state="imported", message=result["message"])
+                self.batch.save()
         mode = mode or ("replace", "above")[self.placement.get_selected()]
         self.submit({"action": "import", "job": str(directory.resolve()), "mode": mode}, imported)
         self.status.set_text("Замена выбранного клипа…" if mode == "replace" else "Добавление над исходным клипом…")
@@ -1025,7 +1120,7 @@ class Application:
             if not self.future and time.monotonic() >= self.next_bake_poll:
                 state_file = self.baking_job / "bake_state.json"
                 state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
-                action = "direct_poll" if state.get("method") == "item_frames" else ("bake_cancel" if self.bake_cancel_requested else "bake_poll")
+                action = "direct_poll" if state.get("method") in ("item_frames", "frame_provider") else ("bake_cancel" if self.bake_cancel_requested else "bake_poll")
                 self.submit({"action": action, "job": str(self.baking_job)}, self.receive_bake, self.bake_error)
             return
         stopped = self.process and self.process.poll() is not None
@@ -1037,6 +1132,16 @@ class Application:
             if self.running_job:
                 self.status.set_text(f'Готово: {result["frame_count"]} кадров, {float(result["output_duration"]):.3f} с. Экспозиция запечена в результат.')
                 self.running_job = None
+            if self.batch_active():
+                if not self.future and self.batch.current["state"] == "running":
+                    if self.auto_pending:
+                        self.auto_pending = False
+                        self.batch.current["state"] = "importing"
+                        self.batch.save()
+                        self.import_job(mode=self.active_import_mode)
+                    else:
+                        self.finish_batch_item("rendered", "Автоимпорт выключен; результат сохранён в файл")
+                return
             if self.auto_pending and not self.future:
                 self.auto_pending = False
                 self.import_job(mode=self.active_import_mode)
@@ -1049,6 +1154,7 @@ class Application:
             if status.get("state") in ("error", "cancelled") or stopped:
                 self.running_job = None
                 self.auto_pending = False
+                self.stop_batch(status.get("message", "Расчёт остановлен"), status.get("state", "error"))
                 self.status.set_text("Расчёт остановлен: " + status.get("message", "процесс завершился без результата") +
                                 ". Подробности — render.log в папке задания.")
         elif status.get("state") in ("starting", "decoding", "rendering", "finishing"):
@@ -1072,8 +1178,13 @@ class Application:
             self.update_job()
         except Exception as error:
             self.auto_pending = False
+            self.stop_batch(str(error))
             self.status.set_text("Ошибка чтения задания: " + str(error))
-        busy = bool(self.future or self.running_job)
+        busy = bool(self.future or self.running_job or self.batch_active())
+        if self.batch_active():
+            fraction = (self.batch.index + self.progress.get_fraction()) / len(self.batch.entries)
+            self.batch_progress.set_fraction(fraction)
+            self.batch_progress.set_text(f"{self.batch.index}/{len(self.batch.entries)} завершено")
         self.start_button.set_sensitive(not busy and (not self.opened_job or bool(self.resume_job)))
         has_target = self.job_target or (self.source_snapshot or {}).get("target")
         self.import_button.set_sensitive(not busy and bool(self.job_target))
@@ -1131,6 +1242,7 @@ class Application:
         if self.closed:
             return
         self.closed = True
+        self.stop_batch("Окно закрыто; текущий процесс может продолжаться отдельно", "detached")
         if self._preference_timer is not None:
             GLib.source_remove(self._preference_timer)
             self._preference_timer = None

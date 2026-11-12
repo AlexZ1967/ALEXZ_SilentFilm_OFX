@@ -1,7 +1,9 @@
 #include "flow_sampler.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <chrono>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -16,6 +18,7 @@ namespace silentfilm::offline {
 #ifdef SILENTFILM_CADENCE_OPENCV
 struct FlowSampler::Impl {
     struct Pair {
+        std::shared_ptr<const SourceFrame> first, second;
         cv::Mat forward, backward, confidenceFirst, confidenceSecond, difference;
         bool stationaryRgb = false;
         std::uint64_t used = 0;
@@ -24,7 +27,9 @@ struct FlowSampler::Impl {
     std::size_t capacity;
     std::function<bool()> cancelled;
     std::map<std::pair<std::int64_t, std::int64_t>, Pair> pairs;
+    std::map<std::pair<std::int64_t, std::int64_t>, std::shared_ptr<FlowFields>> fieldPairs;
     std::uint64_t clock = 0;
+    double elapsed = 0;
 
     void check() const {
         if (cancelled && cancelled()) throw std::runtime_error("Cancelled");
@@ -44,8 +49,8 @@ struct FlowSampler::Impl {
         return image;
     }
 
-    cv::Mat warp(const cv::Mat& image, const cv::Mat& flow, float amount) const {
-        cv::Mat mapX(height, width, CV_32F), mapY(height, width, CV_32F), result;
+    std::array<cv::Mat, 2> warpMaps(const cv::Mat& flow, float amount) const {
+        cv::Mat mapX(height, width, CV_32F), mapY(height, width, CV_32F);
         for (int y = 0; y < height; ++y) {
             check();
             const auto* f = flow.ptr<cv::Vec2f>(y);
@@ -56,12 +61,17 @@ struct FlowSampler::Impl {
                 yy[x] = y - f[x][1] * amount;
             }
         }
-        cv::remap(image, result, mapX, mapY, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        return {mapX, mapY};
+    }
+
+    cv::Mat warp(const cv::Mat& image, const std::array<cv::Mat, 2>& maps) const {
+        cv::Mat result;
+        cv::remap(image, result, maps[0], maps[1], cv::INTER_LINEAR, cv::BORDER_REPLICATE);
         return result;
     }
 
     cv::Mat confidence(const cv::Mat& flow, const cv::Mat& reverse) const {
-        const auto opposite = warp(reverse, flow, -1.0f);
+        const auto opposite = warp(reverse, warpMaps(flow, -1.0f));
         cv::Mat result(height, width, CV_32F);
         for (int y = 0; y < height; ++y) {
             check();
@@ -79,7 +89,7 @@ struct FlowSampler::Impl {
         return result;
     }
 
-    Pair build(const SourceFrame& first, const SourceFrame& second) const {
+    Pair build(const SourceFrame& first, const SourceFrame& second, bool masks = true) const {
         Pair pair;
         pair.stationaryRgb = true;
         // Поток оценивается по RGB: точное совпадение не требует деформации.
@@ -122,6 +132,7 @@ struct FlowSampler::Impl {
                 }
             }
         }
+        if (!masks) return pair;
         pair.confidenceFirst = confidence(pair.forward, pair.backward);
         pair.confidenceSecond = confidence(pair.backward, pair.forward);
         pair.difference.create(height, width, CV_32F);
@@ -143,7 +154,8 @@ FlowSampler::FlowSampler(int width, int height, std::size_t bytes, std::function
 {
     if (width <= 0 || height <= 0) throw std::runtime_error("Invalid optical-flow image dimensions");
     impl_->width = width; impl_->height = height; impl_->cancelled = std::move(cancelled);
-    const auto pairBytes = static_cast<std::size_t>(width) * height * 7 * sizeof(float);
+    // Поля/маски (7 float) и два исходных RGBA кадра (8 float).
+    const auto pairBytes = static_cast<std::size_t>(width) * height * 15 * sizeof(float);
     impl_->capacity = std::clamp<std::size_t>(bytes / pairBytes, 1, 4);
 }
 
@@ -151,6 +163,11 @@ std::shared_ptr<const SourceFrame> FlowSampler::sample(std::shared_ptr<const Sou
     std::shared_ptr<const SourceFrame> second, float mix)
 {
     auto& s = *impl_;
+    struct Timer {
+        double& total;
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        ~Timer() { total += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); }
+    } timer{s.elapsed};
     s.check();
     const auto count = static_cast<std::size_t>(s.width) * s.height;
     if (!first || !second || first->pixels.size() != count || second->pixels.size() != count
@@ -167,6 +184,10 @@ std::shared_ptr<const SourceFrame> FlowSampler::sample(std::shared_ptr<const Sou
             s.pairs.erase(oldest);
         }
         found = s.pairs.emplace(key, s.build(*first, *second)).first;
+        // VideoReader хранит weak_ptr: удерживаем исходники, чтобы не повторять
+        // преобразование RGBA16 -> float для каждого отсчёта одной пары.
+        found->second.first = first;
+        found->second.second = second;
     }
     auto& pair = found->second; pair.used = ++s.clock;
     if (pair.stationaryRgb) {
@@ -186,10 +207,12 @@ std::shared_ptr<const SourceFrame> FlowSampler::sample(std::shared_ptr<const Sou
     static_assert(sizeof(Pixel) == 4 * sizeof(float), "Flow requires tightly packed RGBA pixels");
     const cv::Mat a(s.height, s.width, CV_32FC4, const_cast<Pixel*>(first->pixels.data()));
     const cv::Mat b(s.height, s.width, CV_32FC4, const_cast<Pixel*>(second->pixels.data()));
-    const auto warpedA = s.warp(a, pair.forward, mix);
-    const auto warpedB = s.warp(b, pair.backward, 1.0f - mix);
-    const auto confidenceA = s.warp(pair.confidenceFirst, pair.forward, mix);
-    const auto confidenceB = s.warp(pair.confidenceSecond, pair.backward, 1.0f - mix);
+    const auto mapsA = s.warpMaps(pair.forward, mix);
+    const auto mapsB = s.warpMaps(pair.backward, 1.0f - mix);
+    const auto warpedA = s.warp(a, mapsA);
+    const auto warpedB = s.warp(b, mapsB);
+    const auto confidenceA = s.warp(pair.confidenceFirst, mapsA);
+    const auto confidenceB = s.warp(pair.confidenceSecond, mapsB);
     cv::Mat confidence(s.height, s.width, CV_32F);
     for (int y = 0; y < s.height; ++y) {
         s.check();
@@ -218,8 +241,38 @@ std::shared_ptr<const SourceFrame> FlowSampler::sample(std::shared_ptr<const Sou
     }
     return result;
 }
+std::shared_ptr<const FlowFields> FlowSampler::fields(std::shared_ptr<const SourceFrame> first,
+    std::shared_ptr<const SourceFrame> second)
+{
+    auto& s = *impl_;
+    s.check();
+    const auto count = static_cast<std::size_t>(s.width) * s.height;
+    if (!first || !second || first->pixels.size() != count || second->pixels.size() != count)
+        throw std::runtime_error("Invalid optical-flow frame pair");
+    const auto key = std::make_pair(first->index, second->index);
+    auto cached = s.fieldPairs.find(key);
+    if (cached != s.fieldPairs.end()) return cached->second;
+    const auto started = std::chrono::steady_clock::now();
+    const auto pair = s.build(*first, *second, false);
+    auto result = std::make_shared<FlowFields>();
+    result->stationaryRgb = pair.stationaryRgb;
+    result->first = std::move(first); result->second = std::move(second);
+    if (!pair.stationaryRgb) {
+        result->forward.assign(pair.forward.ptr<float>(), pair.forward.ptr<float>() + 2 * count);
+        result->backward.assign(pair.backward.ptr<float>(), pair.backward.ptr<float>() + 2 * count);
+    }
+    while (s.fieldPairs.size() >= s.capacity) s.fieldPairs.erase(s.fieldPairs.begin());
+    s.fieldPairs.emplace(key, result);
+    s.elapsed += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    return result;
+}
+double FlowSampler::elapsedSeconds() const { return impl_->elapsed; }
 #else
 struct FlowSampler::Impl {};
+std::shared_ptr<const FlowFields> FlowSampler::fields(std::shared_ptr<const SourceFrame>, std::shared_ptr<const SourceFrame>) {
+    throw std::runtime_error("Optical flow is unavailable in this build");
+}
+double FlowSampler::elapsedSeconds() const { return 0; }
 FlowSampler::FlowSampler(int, int, std::size_t, std::function<bool()>) {
     throw std::runtime_error("Optical flow requires OpenCV core/imgproc/video. Install libopencv-dev and reconfigure/rebuild Cadence, or select simple interpolation.");
 }

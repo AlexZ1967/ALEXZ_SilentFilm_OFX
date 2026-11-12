@@ -63,3 +63,25 @@ PYTHONDONTWRITEBYTECODE=1 python3 tests/compare_comfy_flow.py --backend cuda
 ```
 
 Скрипт не читает пользовательское видео и не меняет референс, настройки, проект Resolve или результаты рендера. Временные файлы удаляются по завершении. Артефакты на реальном материале этим непрогнанным тестом не объявляются исправленными. Следующий шаг — получить вывод прямого сравнения и точный успешный Comfy workflow, затем сравнить одинаковые входные кадры, параметры и этап обработки.
+
+
+## CUDA sampler — 2026-11-12
+
+Подготовлены GPU warps/consistency/confidence/5×5 binomial blur/blend с квантованием координат1/32, border/reflect padding как ComfyCUDA. Farneback остаётся CPU. Production CUDA-путь не вызывает CPU sample(); он запрашивает поля через fields(), а деформированные отсчёты сразу передаёт captureCUDA вVRAM. Путь ещё не собран и не проверен.
+
+Команды пользователя после сборки:
+
+```bash
+ctest --test-dir build-cuda -R 'silentfilm_cadence_flow' --output-on-failure
+```
+
+В существующем Python-окружении Comfy:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 tests/compare_comfy_flow.py --backend cuda --native-test build-cuda/silentfilm_cadence_flow_cuda_tests
+```
+
+Это сравнивает именно новый CUDA sampler с ComfyCUDA, прежний target без cuda в имени проверяет CPU sampler.
+
+
+✅ **2026-11-12 — пользователь подтвердил сборку, тесты и независимое сравнение нового CUDA flow sampler с ComfyCUDA.** Предоставлен вывод `tests/compare_comfy_flow.py --backend cuda --native-test build-cuda/silentfilm_cadence_flow_cuda_tests`, Python OpenCV4.11.0. Все12 сравнений (displacement8/24/48 и960×540/downscale, по3 mix) укладываются в допуски: наибольший max_error=1.69873e-05, наибольший mean_error=1.92856e-07 (пороги1e-3/1e-5). Это подтверждает близость warp/confidence/blend на тестовых кадрах к фактическому ComfyCUDA, но не побитовую идентичность и не полный end-to-end Camera/Resolve. Пользователь также сообщил, что сборка и тесты прошли; полного лога CTest/количества тестов нет. Ускорение на реальном клипе и поведение при давлении на VRAM ещё не измерены. Следующий шаг — одинаковый реальный клип/параметры, замер подготовки и native, визуальная проверка смаза в Resolve.

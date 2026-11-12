@@ -76,7 +76,7 @@ sudo apt update
 sudo apt install pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev ffmpeg
 ```
 
-Утилита непосредственно использует libavformat/libavcodec/libavutil/libswscale в своём процессе. `/usr/bin/ffmpeg` нужен также GTK-приложению для потоковой упаковки PNG кадров Resolve в FFV1; `ffprobe` нужен для условного интеграционного CTest. Native helper использует библиотеки FFmpeg напрямую. Кодирование ProRes использует штатный `prores_ks` при его наличии в установленной libavcodec; альтернатива — собственный writer TIFF RGBA16 без дополнительного encoder-пакета. CUDA по-прежнему включается отдельной `SILENTFILM_ENABLE_CUDA`; native CUDA target получает тот же финальный device-link шаг. Для OFX без helper можно задать `-DSILENTFILM_BUILD_CADENCE=OFF`.
+Утилита непосредственно использует libavformat/libavcodec/libavutil/libswscale в своём процессе. Для нового прямого источника кадров исполняемый `ffmpeg` не нужен: PNG декодирует libavcodec внутри native helper. `ffmpeg`/`ffprobe` нужны для интеграционных тестов и старого пути с FFV1. Native helper использует библиотеки FFmpeg напрямую. Кодирование ProRes использует штатный `prores_ks` при его наличии в установленной libavcodec; альтернатива — собственный writer TIFF RGBA16 без дополнительного encoder-пакета. CUDA по-прежнему включается отдельной `SILENTFILM_ENABLE_CUDA`; native CUDA target получает тот же финальный device-link шаг. Для OFX без helper можно задать `-DSILENTFILM_BUILD_CADENCE=OFF`.
 
 Прежний скрипт Resolve написан на Lua, дополнительных Python-модулей/Conda не требует. Его инструкция — `CADENCE_PREPARE.md`.
 
