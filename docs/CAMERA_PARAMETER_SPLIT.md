@@ -1,4 +1,8 @@
-# Разделение Comfy Camera между Cadence и Camera Optics — 0.16
+# Разделение Comfy Camera между Cadence и Camera Optics — 0.18
+
+Для конкретного рабочего workflow пользователя теперь есть [Reference Preset 0.19 и таблица значений](COMFY_WORKFLOW_MATCH.md); исходные default values Comfy ниже не заменяют настройки этого workflow.
+
+✅ **2026-11-12 — подготовлена сверка и доработка съёмочной оптики:** [математика, контролы и проверки Camera Optics](CAMERA_OPTICS.md). Фокус нормализуется по всему клипу; CPU использует одну ЧБ-плоскость, CPU/CUDA Gaussian уменьшает изображение как PyTorch area. Новые проверки пока не запускались.
 
 Основа сверки — `VideoSilentFilmCamera.INPUT_TYPES()` в `nodes/video_silent_film_pipeline.py` референса. Standalone `VideoSilentFilmCadence` также содержит режимы совместимости, которые Camera намеренно фиксирует. Имена контролов английские, как в Comfy (с сохранением snake_case), подсказки русские. Старые внутренние OFX parameter IDs и request keys сохраняются: смена отображаемого имени не ломает сохранённые значения.
 
@@ -17,10 +21,10 @@
 | Exposure | `shutter_fraction` | `shutter` → `CadenceSettings::shutterFraction`, ширина выдержки |
 | Exposure | `motion_blur_strength` | `motion_blur` → `motionBlurStrength`, масштаб временной интеграции |
 | Exposure | `blur_samples` | `samples` → `exposureSamples`, 1–17 на CPU/CUDA; default 9 |
-| Exposure | `exposure_variation` | `exposure_link` → gain каждой физической экспозиции, запекается в RGB |
+| Exposure | `exposure_variation` | `exposure_link` → gain каждой физической экспозиции: Bake запекает в RGB, Exposure via OFX сохраняет карту для SilentFilm Crank Exposure/Blend |
 | Camera Motion | `camera_shake_strength` | `shake` → преобразование каждого временного отсчёта до усреднения |
 | Информация | `timeline_fps` | Частота показа результата всегда из текущего таймлайна; отдельного контрола `output_fps` нет, ключ остаётся в native request |
-| Processing | `compute_device` | Request `device`: поддержаны `cpu` и `cuda`; flow пока CPU OpenCV в обоих случаях |
+| Processing | `compute_device` | Request `device`: CPU или CUDA; Farneback оценивается CPU OpenCV, в CUDA деформация/confidence/смешивание выполняются GPU |
 | Storage | `Output Folder` | Корень генераций, сохраняется в настройках и пресетах; внутри проект с ID и папка клипа_cadence_ID |
 
 Диапазон `target_fps_min/max` расширен до 1–60, как в исходной Cadence. Camera defaults — 16/20, `fps_drift_strength=0.7`, `crank_irregularity=0.15`, `shutter_fraction=0.65`, `motion_blur_strength=0.8`, `blur_samples=9`, `camera_shake_strength=0.25`, `exposure_variation=1`, `seed=1925`.
@@ -54,7 +58,7 @@
 | Vignette and Edge Blur | `edge_end` | `edge_end` | Радиус полной силы обоих эффектов; строго больше start |
 | Vignette and Edge Blur | `edge_softness` | `edge_softness` | Переменный радиус Gaussian по маске, восстановлен в 0.14 |
 | Focus and Softness | `softness` | `camera_softness` | Равномерная мягкость всего кадра |
-| Focus and Softness | `focus_drift_strength` | `focus_drift` | Случайное воспроизводимое гуляние фокуса по выходным кадрам |
+| Focus and Softness | `focus_drift_strength` | `focus_drift` | Воспроизводимый AR(1)/tanh фокус с нормализацией по всему клипу, выключен на одном кадре |
 | Focus and Softness | `seed` | `focus_seed` | Независимый seed гуляния фокуса |
 
 Это весь оптический набор Comfy Camera. Его default values сохранены: vignette 0.12, edge softness 0.15, edge start/end 0.6/1, softness 0.1, focus drift 0.03. В раннем упрощении `edge_softness` был не только убран из UI, но и обнулён в settings reader — теперь восстановлены descriptor, handle, чтение анимированного значения и передача в оба backend. Файловых входов/карт экспозиции у Camera Optics нет. Монохромный выход сохранён.
@@ -69,6 +73,6 @@
 
 ## Возврат результата
 
-По умолчанию **Add Above Source**. Выбирается ближайшая существующая видеодорожка выше исходной, включённая, незаблокированная и свободная на всём интервале `[start, start + M)`. Клипам до и после этого интервала разрешено оставаться на дорожке. Если ни одна существующая дорожка не подходит, создаётся ровно одна новая верхняя. Существующие дорожки, клипы и аудио не удаляются. При ошибке вставки удаляется только собственная новая дорожка, если она осталась пустой; backup сохраняется.
+По умолчанию **Add Above Source**. Выбирается ближайшая существующая видеодорожка выше исходной, незаблокированная и свободная на всём интервале `[start, start + M)`, включая отключённые дорожки. Их видимость не меняется. Клипам до и после этого интервала разрешено оставаться на дорожке. Если ни одна существующая дорожка не подходит, создаётся ровно одна новая верхняя. Существующие дорожки, клипы и аудио не удаляются. При ошибке вставки удаляется только собственная новая дорожка, если она осталась пустой; backup сохраняется.
 
 Все изменения 0.14 подготовлены в исходниках; сборка, тесты и реальный Resolve-повтор агентом не запускались.

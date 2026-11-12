@@ -182,6 +182,14 @@ CaptureInterval HandCrankSchedule::intervalForIndex(std::size_t index) const
         initialPhase_ + static_cast<double>(index) / 8.0, rates_[index]};
 }
 
+void HandCrankSchedule::clear()
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<double>{}.swap(starts_);
+    std::vector<double>{}.swap(rates_);
+    initialized_ = false;
+}
+
 CaptureInterval HandCrankSchedule::intervalAt(double relativeTime, const HandCrankSettings& settings)
 {
     const std::lock_guard<std::mutex> lock(mutex_);

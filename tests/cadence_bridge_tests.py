@@ -13,6 +13,108 @@ bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
 
+class CrankExposureImport(unittest.TestCase):
+    """Keep exposure binding explicit and do not lose an imported clip on unsupported host APIs."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / "exposure.sfexposure"
+        self.path.write_text("SILENTFILM_CRANK_EXPOSURE 1\nofx 25 1\n0 1.2\n", encoding="utf-8")
+        self.item = Mock()
+        self.item.GetUniqueId.return_value = "result-item"
+        self.timeline = Mock()
+        self.timeline.GetUniqueId.return_value = "timeline"
+        self.timeline.GetTrackCount.return_value = 1
+        self.timeline.GetItemListInTrack.return_value = [self.item]
+        self.project = Mock()
+        self.project.GetCurrentTimeline.return_value = self.timeline
+        self.resolve = Mock()
+        self.resolve.GetEffectsList.return_value = [{"category": "ofx", "id": "host-crank-id", "name": "SilentFilm Crank Exposure"}]
+        self.outcome = {"timeline_id": "timeline", "item_id": "result-item", "message": "Импортировано."}
+        self.result = {"exposure_mode": "ofx", "exposure_map_path": str(self.path)}
+
+    def test_add_effect_disabled_until_explicit_map_selection(self):
+        outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.item.AddEffect.assert_called_once_with("ofx", "host-crank-id")
+        self.item.AddEffect.return_value.SetIsEnabled.assert_called_once_with(False)
+        self.assertEqual(outcome["exposure_status"], "manual_map_required")
+        self.assertEqual(outcome["exposure_map_path"], str(self.path))
+        self.assertIn("выключен", outcome["message"])
+
+    def test_bake_does_not_add_an_effect(self):
+        outcome = bridge.attach_crank_exposure(self.project, {"exposure_mode": "bake"}, self.outcome, self.resolve)
+        self.item.AddEffect.assert_not_called()
+        self.resolve.GetEffectsList.assert_not_called()
+        self.assertNotIn("exposure_status", outcome)
+
+    def test_missing_effect_preserves_result_and_instructs_manual_addition(self):
+        self.resolve.GetEffectsList.return_value = []
+        outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.assertEqual(outcome["exposure_status"], "manual_add")
+        self.item.AddEffect.assert_not_called()
+        self.assertIn("Добавь ноду вручную", outcome["message"])
+
+    def test_rejected_add_effect_preserves_result(self):
+        self.item.AddEffect.return_value = None
+        outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.assertEqual(outcome["item_id"], "result-item")
+        self.assertEqual(outcome["exposure_status"], "manual_add")
+
+    def test_rejected_disable_removes_unconfigured_effect(self):
+        self.item.AddEffect.return_value.SetIsEnabled.return_value = False
+        bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.item.DeleteEffects.assert_called_once_with([self.item.AddEffect.return_value])
+
+    def test_fusion_binding_uses_configured_effect_without_adding_direct_ofx(self):
+        configured = {"exposure_status": "configured_fusion", "exposure_effect_enabled": True}
+        with patch.object(bridge, "configure_fusion_exposure", return_value=configured) as bind:
+            outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        bind.assert_called_once()
+        self.assertEqual(bind.call_args.args[2], str(self.path))
+        self.assertEqual(outcome["exposure_status"], "configured_fusion")
+        self.item.AddEffect.assert_not_called()
+        self.resolve.GetEffectsList.assert_not_called()
+
+    def test_rebinding_removes_only_the_known_disabled_legacy_effect(self):
+        self.outcome["exposure_ofx_id"] = "host-crank-id"
+        previous = Mock()
+        previous.GetInfo.return_value = {"id": "host-crank-id"}
+        previous.GetIsEnabled.return_value = False
+        self.item.GetEffects.return_value = [previous]
+        with patch.object(bridge, "configure_fusion_exposure", return_value={"exposure_status": "configured_fusion", "exposure_effect_enabled": True}):
+            bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.item.DeleteEffects.assert_called_once_with([previous])
+        self.item.AddEffect.assert_not_called()
+
+    def test_an_enabled_legacy_effect_is_not_duplicated(self):
+        self.outcome["exposure_ofx_id"] = "host-crank-id"
+        previous = Mock()
+        previous.GetInfo.return_value = {"id": "host-crank-id"}
+        previous.GetIsEnabled.return_value = True
+        self.item.GetEffects.return_value = [previous]
+        with patch.object(bridge, "configure_fusion_exposure") as bind:
+            outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.assertEqual(outcome["exposure_status"], "manual_existing")
+        bind.assert_not_called()
+        self.item.AddEffect.assert_not_called()
+        self.item.DeleteEffects.assert_not_called()
+
+    def test_unrecoverable_fusion_failure_does_not_add_another_effect(self):
+        error = bridge.FusionExposureError("rollback failed", requires_recovery=True)
+        with patch.object(bridge, "configure_fusion_exposure", side_effect=error):
+            outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.assertEqual(outcome["exposure_status"], "manual_recovery")
+        self.item.AddEffect.assert_not_called()
+
+    def test_optional_log_failure_does_not_undo_successful_binding(self):
+        with patch.object(bridge, "configure_fusion_exposure", return_value={"exposure_status": "configured_fusion", "exposure_effect_enabled": True}), \
+                patch.object(bridge, "atomic_json", side_effect=OSError("readonly")), patch("builtins.print"):
+            outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve)
+        self.assertEqual(outcome["exposure_status"], "configured_fusion")
+        self.item.AddEffect.assert_not_called()
+
+
 class LocalModuleDiscovery(unittest.TestCase):
     """Resolve sibling modules even when the host interpreter omits the script directory."""
 
@@ -49,6 +151,7 @@ class ImportIsolation(unittest.TestCase):
         self.timeline.GetName.return_value = "Generated"
         self.item = Mock()
         self.item.GetDuration.return_value = 115
+        self.item.GetUniqueId.return_value = "generated-item"
         self.pool = Mock()
         self.pool.ImportMedia.return_value = [self.clip]
         self.pool.CreateEmptyTimeline.return_value = self.timeline
@@ -91,6 +194,22 @@ class ImportIsolation(unittest.TestCase):
         self.assertIn("Уже импортировано", again["message"])
         self.pool.ImportMedia.assert_called_once()
         self.pool.CreateEmptyTimeline.assert_called_once()
+
+    def test_import_retries_map_binding_without_reimporting_media(self):
+        path = self.directory / "exposure.sfexposure"
+        path.touch()
+        with (self.directory / "result.ini").open("a", encoding="utf-8") as out:
+            out.write(f"exposure_mode=ofx\nexposure_map_path={path}\n")
+        states = iter(("manual_map_required", "configured_fusion"))
+        def attach(project, result, outcome, resolve):
+            return dict(outcome, exposure_status=next(states))
+        with patch.object(bridge, "attach_crank_exposure", side_effect=attach) as bind:
+            self.run_import()
+            self.run_import()
+            self.run_import()
+        self.assertEqual(bind.call_count, 2)
+        self.pool.ImportMedia.assert_called_once()
+        self.pool.AppendToTimeline.assert_called_once()
 
     def test_movie_import_uses_simple_path(self):
         """Use the path form already exercised by the legacy MOV import."""
@@ -815,6 +934,16 @@ class CameraParameterMapping(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "таймлайн"):
             resolve("timeline", 36, {"output_fps": 30}, snapshot)
 
+    def test_old_helper_is_rejected_before_preparing_resolve_frames(self):
+        capabilities = {"camera_parameter_schema": 2, "max_blur_samples": 17, "optical_flow": True,
+                        "native_timeline_source": True, "resolve_frame_provider": True}
+        reply = Mock(returncode=0, stdout=json.dumps(capabilities))
+        with patch.object(self.app.subprocess, "run", return_value=reply):
+            with self.assertRaisesRegex(RuntimeError, "Bake/OFX"):
+                self.app.require_flow_support("helper", "simple", raw=True, exposure_mode="ofx")
+            reply.stdout = json.dumps(dict(capabilities, exposure_ofx=True))
+            self.app.require_flow_support("helper", "simple", raw=True, exposure_mode="ofx")
+
     def test_loading_existing_preset_does_not_replace_dropdown_model(self):
         """Loading after Factory Reset must not enqueue new selection notifications."""
         app = self.app.Application.__new__(self.app.Application)
@@ -935,7 +1064,7 @@ class BatchProcessing(unittest.TestCase):
             app_spec.loader.exec_module(module)
         app = module.Application.__new__(module.Application)
         app.batch = self.queue
-        for name in ("job", "progress", "batch_progress", "batch_label", "status", "submit",
+        for name in ("job", "progress", "batch_progress", "batch_label", "status", "submit", "exposure_map_path",
                      "update_source_fps_display", "update_source_mode", "guarded"):
             setattr(app, name, Mock())
         app.job.get_text.return_value = str(self.directory)

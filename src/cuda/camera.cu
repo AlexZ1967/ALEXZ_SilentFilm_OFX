@@ -118,23 +118,23 @@ __global__ void captureKernel(CapturePacket packet, Pixel* captured, float* mask
         ? optics::lensEdgeMask(ax, ay, bounds.x1, bounds.y1, bounds.x2, bounds.y2, parameters) : 0.0f;
 }
 
-/** Preserve the CPU area-overlap reduction used for broad Gaussian kernels. */
+/** Match PyTorch area/adaptive-average reduction for broad Gaussian kernels. */
 __global__ void areaKernel(const Pixel* source, Pixel* output, int sw, int sh, int ow, int oh)
 {
     const int x = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     const int y = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
     if (x >= ow || y >= oh) return;
-    const float xb = static_cast<float>(x) * sw / ow, xe = static_cast<float>(x + 1) * sw / ow;
-    const float yb = static_cast<float>(y) * sh / oh, ye = static_cast<float>(y + 1) * sh / oh;
+    const int xb = static_cast<int>(static_cast<long long>(x) * sw / ow);
+    const int xe = static_cast<int>((static_cast<long long>(x + 1) * sw + ow - 1) / ow);
+    const int yb = static_cast<int>(static_cast<long long>(y) * sh / oh);
+    const int ye = static_cast<int>((static_cast<long long>(y + 1) * sh + oh - 1) / oh);
     Pixel sum{};
-    for (int sy = static_cast<int>(floorf(yb)); sy < static_cast<int>(ceilf(ye)); ++sy) {
-        const float wy = fmaxf(0.0f, fminf(ye, static_cast<float>(sy + 1)) - fmaxf(yb, static_cast<float>(sy)));
-        for (int sx = static_cast<int>(floorf(xb)); sx < static_cast<int>(ceilf(xe)); ++sx) {
-            const float wx = fmaxf(0.0f, fminf(xe, static_cast<float>(sx + 1)) - fmaxf(xb, static_cast<float>(sx)));
-            addWeighted(sum, source[static_cast<std::size_t>(min(sy, sh - 1)) * sw + min(sx, sw - 1)], wx * wy);
+    for (int sy = yb; sy < ye; ++sy) {
+        for (int sx = xb; sx < xe; ++sx) {
+            addWeighted(sum, source[static_cast<std::size_t>(sy) * sw + sx], 1.0f);
         }
     }
-    output[static_cast<std::size_t>(y) * ow + x] = scaled(sum, 1.0f / ((xe - xb) * (ye - yb)));
+    output[static_cast<std::size_t>(y) * ow + x] = scaled(sum, 1.0f / static_cast<float>((xe - xb) * (ye - yb)));
 }
 
 __device__ int border(int index, int length, bool reflect)
@@ -221,6 +221,7 @@ __global__ void vignetteKernel(Pixel* signal, const float* mask, std::size_t cou
 
 __device__ float expose(float value, float gain)
 {
+    if (gain == 1.0f) return fminf(1, fmaxf(0, value));
     return film::encode(fminf(1, fmaxf(0, film::decode(value, Transfer::SRGB) * gain)), Transfer::SRGB);
 }
 
@@ -282,10 +283,10 @@ dim3 grid(int width, int height)
 void gaussian(const Pixel* source, Pixel* output, Pixel* smallA, Pixel* smallB,
     int width, int height, float sigma, cudaStream_t stream)
 {
-    const float scale = std::min(1.0f, 3.0f / sigma);
-    const int sw = scale < 1 ? std::max(1, static_cast<int>(std::round(width * scale))) : width;
-    const int sh = scale < 1 ? std::max(1, static_cast<int>(std::round(height * scale))) : height;
-    const float smallSigma = sigma * scale;
+    const double scale = std::min(1.0, 3.0 / sigma);
+    const int sw = scale < 1 ? optics::blurDimension(width, scale) : width;
+    const int sh = scale < 1 ? optics::blurDimension(height, scale) : height;
+    const float smallSigma = static_cast<float>(sigma * scale);
     GaussianKernel kernel;
     kernel.radius = static_cast<int>(std::ceil(3.0f * smallSigma));
     float total = 0;

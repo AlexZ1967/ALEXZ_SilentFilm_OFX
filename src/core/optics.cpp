@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace silentfilm {
@@ -38,8 +39,10 @@ Plane processCameraPlane(Plane signal, int width, int height, const Plane& edgeM
     const CameraOpticsParameters& parameters, AbortCallback abort, void* context)
 {
     const auto pixelCount = signal.size();
-    Plane accumulated(pixelCount, 0.0f);
+    Plane accumulated;
     const float edgeMaximumSigma = static_cast<float>(width) / 40.0f * parameters.edgeSoftness;
+    if (edgeMaximumSigma <= 0) accumulated = std::move(signal);
+    else accumulated.assign(pixelCount, 0.0f);
     std::vector<float> edgeLevels{0.0f};
     if (edgeMaximumSigma > 0) {
         float sigma = std::min(0.5f, edgeMaximumSigma);
@@ -47,7 +50,7 @@ Plane processCameraPlane(Plane signal, int width, int height, const Plane& edgeM
         edgeLevels.push_back(edgeMaximumSigma);
     }
 
-    for (std::size_t level = 0; level < edgeLevels.size(); ++level) {
+    for (std::size_t level = 0; edgeMaximumSigma > 0 && level < edgeLevels.size(); ++level) {
         Plane blurred;
         if (level == 0) blurred = signal;
         else if (!gaussianBlur(signal, width, height, edgeLevels[level], blurred, abort, context)) return {};
@@ -108,26 +111,19 @@ bool areaResize(const Plane& source, int sourceWidth, int sourceHeight,
     output.resize(static_cast<std::size_t>(outputWidth) * outputHeight);
     for (int y = 0; y < outputHeight; ++y) {
         if (cancelled(abort, context)) return false;
-        const float yBegin = static_cast<float>(y) * sourceHeight / outputHeight;
-        const float yEnd = static_cast<float>(y + 1) * sourceHeight / outputHeight;
-        const int firstY = static_cast<int>(std::floor(yBegin));
-        const int lastY = static_cast<int>(std::ceil(yEnd));
+        // PyTorch area использует adaptive average pooling с целыми границами корзин.
+        const int firstY = static_cast<int>(static_cast<std::int64_t>(y) * sourceHeight / outputHeight);
+        const int lastY = static_cast<int>((static_cast<std::int64_t>(y + 1) * sourceHeight + outputHeight - 1) / outputHeight);
         for (int x = 0; x < outputWidth; ++x) {
-            const float xBegin = static_cast<float>(x) * sourceWidth / outputWidth;
-            const float xEnd = static_cast<float>(x + 1) * sourceWidth / outputWidth;
-            const int firstX = static_cast<int>(std::floor(xBegin));
-            const int lastX = static_cast<int>(std::ceil(xEnd));
+            const int firstX = static_cast<int>(static_cast<std::int64_t>(x) * sourceWidth / outputWidth);
+            const int lastX = static_cast<int>((static_cast<std::int64_t>(x + 1) * sourceWidth + outputWidth - 1) / outputWidth);
             float sum = 0;
             for (int sy = firstY; sy < lastY; ++sy) {
-                const float overlapY = std::max(0.0f, std::min(yEnd, static_cast<float>(sy + 1))
-                    - std::max(yBegin, static_cast<float>(sy)));
                 for (int sx = firstX; sx < lastX; ++sx) {
-                    const float overlapX = std::max(0.0f, std::min(xEnd, static_cast<float>(sx + 1))
-                        - std::max(xBegin, static_cast<float>(sx)));
-                    sum += source[static_cast<std::size_t>(sy) * sourceWidth + sx] * overlapX * overlapY;
+                    sum += source[static_cast<std::size_t>(sy) * sourceWidth + sx];
                 }
             }
-            output[static_cast<std::size_t>(y) * outputWidth + x] = sum / ((xEnd - xBegin) * (yEnd - yBegin));
+            output[static_cast<std::size_t>(y) * outputWidth + x] = sum / static_cast<float>((lastX - firstX) * (lastY - firstY));
         }
     }
     return true;
@@ -185,9 +181,9 @@ bool resizeBilinear(const Plane& source, int sourceWidth, int sourceHeight,
 bool gaussianBlur(const Plane& source, int width, int height, float sigma,
     Plane& output, AbortCallback abort, void* context)
 {
-    const float scale = std::min(1.0f, 3.0f / sigma);
-    const int smallWidth = scale < 1 ? std::max(1, static_cast<int>(std::round(width * scale))) : width;
-    const int smallHeight = scale < 1 ? std::max(1, static_cast<int>(std::round(height * scale))) : height;
+    const double scale = std::min(1.0, 3.0 / sigma);
+    const int smallWidth = scale < 1 ? optics::blurDimension(width, scale) : width;
+    const int smallHeight = scale < 1 ? optics::blurDimension(height, scale) : height;
     Plane reduced;
     if (scale < 1) {
         if (!areaResize(source, width, height, reduced, smallWidth, smallHeight, abort, context)) return false;
@@ -195,7 +191,7 @@ bool gaussianBlur(const Plane& source, int width, int height, float sigma,
         reduced = source;
     }
 
-    const float smallSigma = sigma * scale;
+    const float smallSigma = static_cast<float>(sigma * scale);
     const int radius = static_cast<int>(std::ceil(3.0f * smallSigma));
     std::vector<float> kernel(static_cast<std::size_t>(2 * radius + 1));
     float total = 0;
@@ -230,6 +226,83 @@ float levelWeight(const std::vector<float>& levels, std::size_t index, float sig
 }
 
 } // namespace
+
+void CameraFocusCache::clear()
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<float>{}.swap(signals_);
+}
+
+float CameraFocusCache::at(std::size_t frame, std::size_t count, std::uint32_t seed)
+{
+    if (count <= 1) return 0;
+    if (count > 10000000) throw std::invalid_argument("Unsupported camera focus clip length");
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (signals_.size() != count || seed_ != seed) {
+        // Публикуем готовый сигнал целиком: ошибка выделения не оставляет частичный кэш.
+        std::vector<float> values(count);
+        float previous = 0;
+        double sum = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const float noise = film::gaussianLattice(static_cast<int>(i), 0, seed ^ 0x464f4355u, 64u);
+            previous = previous * 0.48f + noise * 0.52f;
+            values[i] = previous;
+            sum += previous;
+        }
+        const double mean = sum / count;
+        double square = 0;
+        for (const auto value : values) { const double difference = value - mean; square += difference * difference; }
+        const double deviation = std::sqrt(square / count);
+        for (auto& value : values)
+            value = static_cast<float>(std::tanh((value - mean) / (deviation > 1e-8 ? deviation : 1.0)));
+        signals_ = std::move(values);
+        seed_ = seed;
+    }
+    return signals_[std::min(frame, count - 1)];
+}
+
+bool renderCameraOpticsCpu(ImageView source, ImageView output, RenderWindow window,
+    const CameraOpticsParameters& parameters, AbortCallback abort, void* context)
+{
+    const int width = source.x2 - source.x1, height = source.y2 - source.y1;
+    if (width <= 0 || height <= 0) return true;
+    const auto count = static_cast<std::size_t>(width) * height;
+    Plane signal(count), mask(count, 0.0f);
+    for (int y = 0; y < height; ++y) {
+        if (cancelled(abort, context)) return false;
+        for (int x = 0; x < width; ++x) {
+            auto pixel = readPixel(source, source.x1 + x, source.y1 + y);
+            if (parameters.sourcePremultiplied) {
+                if (pixel.a <= 0) pixel.r = pixel.g = pixel.b = 0;
+                else { pixel.r /= pixel.a; pixel.g /= pixel.a; pixel.b /= pixel.a; }
+            }
+            const auto index = static_cast<std::size_t>(y) * width + x;
+            // Линейные пространственные операции коммутируют с ЧБ-взвешиванием.
+            signal[index] = std::clamp(pixel.r, 0.0f, 1.0f) * 0.299f
+                + std::clamp(pixel.g, 0.0f, 1.0f) * 0.587f + std::clamp(pixel.b, 0.0f, 1.0f) * 0.114f;
+            if (parameters.edgeSoftness > 0 || parameters.vignetteStrength > 0)
+                mask[index] = optics::lensEdgeMask(x, y, 0, 0, width, height, parameters);
+        }
+    }
+    signal = processCameraPlane(std::move(signal), width, height, mask, parameters, abort, context);
+    if (signal.size() != count) return false;
+    for (int y = std::max(window.y1, output.y1); y < std::min(window.y2, output.y2); ++y) {
+        if (cancelled(abort, context)) return false;
+        for (int x = std::max(window.x1, output.x1); x < std::min(window.x2, output.x2); ++x) {
+            Pixel pixel{};
+            if (x >= source.x1 && x < source.x2 && y >= source.y1 && y < source.y2) {
+                const float alpha = readPixel(source, x, y).a;
+                float value = signal[static_cast<std::size_t>(y - source.y1) * width + (x - source.x1)];
+                if (parameters.outputPremultiplied) value *= alpha;
+                pixel = {value, value, value, alpha};
+            }
+            auto* address = output.data + (static_cast<std::ptrdiff_t>(y) - output.y1) * output.rowBytes
+                + (static_cast<std::ptrdiff_t>(x) - output.x1) * sizeof(Pixel);
+            std::memcpy(address, &pixel, sizeof(pixel));
+        }
+    }
+    return true;
+}
 
 bool renderCameraCpu(ImageView source, ImageView output, RenderWindow window,
     const CameraOpticsParameters& parameters, float exposureGain, AbortCallback abort, void* context)

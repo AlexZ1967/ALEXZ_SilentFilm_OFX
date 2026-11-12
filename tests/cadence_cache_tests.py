@@ -34,6 +34,14 @@ class CacheFixture(unittest.TestCase):
 class ManagedStorage(CacheFixture):
     """Protect project boundaries and active or referenced generations."""
 
+    def test_ofx_exposure_map_is_preserved_without_visible_media_usage(self):
+        directory = self.job()
+        (directory / "result.ini").write_text("exposure_mode=ofx\n", encoding="utf-8")
+        (directory / "exposure.sfexposure").write_text("map", encoding="utf-8")
+        self.assertEqual(self.candidates(), [])
+        (directory / "result.ini").write_text("exposure_mode=bake\n", encoding="utf-8")
+        self.assertEqual([entry["path"] for entry in self.candidates()], [str(directory)])
+
     def test_active_frame_provider_blocks_cleanup_after_native_error(self):
         directory = self.job(state="error")
         (directory / "bake_state.json").write_text(json.dumps({"method": "frame_provider", "provider_active": True}), encoding="utf-8")

@@ -26,6 +26,8 @@ class ProjectorSignalCache {
     std::vector<std::array<float, 4>> signals_;
     std::uint32_t seed_ = 0;
 public:
+    /** Release reconstructible CPU signals without changing future frame values. */
+    void clear();
     ProjectorFrameState at(std::size_t frame, std::size_t frameCount, std::uint32_t seed,
         float weave, float flicker, float breathing);
 };
@@ -35,12 +37,18 @@ class ProjectorCudaCache {
     struct Impl;
     std::unique_ptr<Impl> impl_;
 public:
+    static constexpr std::size_t maximumPlanSets = 8;
     ProjectorCudaCache();
     ~ProjectorCudaCache();
     ProjectorCudaCache(const ProjectorCudaCache&) = delete;
     ProjectorCudaCache& operator=(const ProjectorCudaCache&) = delete;
+    /** Release owned plans in their contexts and restore the caller's context stack. */
+    CudaStatus clear() noexcept;
+    /** Return the bounded number of retained plan sets for lifecycle diagnostics. */
+    std::size_t cachedPlanCount() const;
     CudaStatus render(ImageView source, ImageView output, RenderWindow window,
-        const ProjectorParameters& parameters, void* stream, bool hostStreamProvided) noexcept;
+        const ProjectorParameters& parameters, void* stream, bool hostStreamProvided,
+        bool linearDiffusion = false) noexcept;
 };
 
 } // namespace silentfilm

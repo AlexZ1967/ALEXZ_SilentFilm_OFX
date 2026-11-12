@@ -1,0 +1,453 @@
+{
+  "schema": 1,
+  "reference": "/mnt/comfy/ComfyUI/custom_nodes/ComfyUI_ALEXZ_SilentFilm/workflows/Видео-в-Хронику-по-этапам_with_defects.json",
+  "sha256": "90b765aca4ac88a7785702fac84f0cf3952e733130b5238d02e94c1c5a7a58c8",
+  "nodes": [
+    {
+      "node": 2,
+      "type": "VideoSilentFilmCamera",
+      "widgets": [
+        24,
+        20,
+        24,
+        1,
+        0.5,
+        0.5,
+        0.5,
+        "flow_integrated",
+        9,
+        0.5,
+        0.15,
+        0.6,
+        0.05,
+        0.6,
+        1.3,
+        0.04,
+        1,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "parameters": {
+        "source_fps": 24,
+        "target_fps_min": 20,
+        "target_fps_max": 24,
+        "fps_drift_strength": 1,
+        "crank_irregularity": 0.5,
+        "shutter_fraction": 0.5,
+        "motion_blur_strength": 0.5,
+        "blur_mode": "flow_integrated",
+        "blur_samples": 9,
+        "camera_shake_strength": 0.5,
+        "softness": 0.15,
+        "vignette_strength": 0.6,
+        "edge_softness": 0.05,
+        "edge_start": 0.6,
+        "edge_end": 1.3,
+        "focus_drift_strength": 0.04,
+        "exposure_variation": 1,
+        "seed": 1925
+      },
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 3,
+      "type": "VideoSilentFilmNegative",
+      "widgets": [
+        "srgb",
+        0,
+        0,
+        0.15,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0.01,
+        2,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "parameters": {
+        "input_transfer": "srgb",
+        "exposure_ev": 0,
+        "halation_strength": 0,
+        "halation_size": 0.15,
+        "development_contrast": 1,
+        "shadow_softness": 0,
+        "highlight_softness": 0,
+        "fog_strength": 0,
+        "development_variation": 0,
+        "grain_strength": 0.01,
+        "grain_size": 2,
+        "seed": 1925
+      },
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 4,
+      "type": "VideoSilentFilmPrint",
+      "widgets": [
+        "from_negative",
+        0,
+        0,
+        0.15,
+        1,
+        0,
+        0,
+        0,
+        0,
+        "neutral_bw",
+        0,
+        2,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "parameters": {
+        "output_transfer": "from_negative",
+        "print_exposure_ev": 0,
+        "halation_strength": 0,
+        "halation_size": 0.15,
+        "print_contrast": 1,
+        "shadow_softness": 0,
+        "highlight_softness": 0,
+        "fog_strength": 0,
+        "print_softness": 0,
+        "tone_mode": "neutral_bw",
+        "grain_strength": 0,
+        "grain_size": 2,
+        "seed": 1925
+      },
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 5,
+      "type": "VideoSilentFilmProjector",
+      "widgets": [
+        25,
+        2,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0.6,
+        1,
+        0.035,
+        0.015,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "parameters": {
+        "projection_fps": 25,
+        "gate_weave_px": 2,
+        "softness": 0,
+        "glow_strength": 0,
+        "glow_size": 1,
+        "vignette_strength": 0,
+        "edge_softness": 0,
+        "edge_start": 0.6,
+        "edge_end": 1,
+        "lamp_flicker": 0.035,
+        "lamp_breathing": 0.015,
+        "seed": 1925
+      },
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 14,
+      "type": "VideoSilentFilmCaptureDirt",
+      "widgets": [
+        0,
+        "dust",
+        10,
+        0.2,
+        48,
+        1,
+        0.7,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 15,
+      "type": "VideoSilentFilmNegativeDevelopment",
+      "widgets": [
+        0.1,
+        "mottling",
+        15,
+        0.15,
+        48,
+        0.6,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1924
+      }
+    },
+    {
+      "node": 16,
+      "type": "VideoSilentFilmNegativeDamage",
+      "widgets": [
+        0.3,
+        "dust",
+        "dirty",
+        3,
+        0.3,
+        24,
+        0.6,
+        0,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1923
+      }
+    },
+    {
+      "node": 17,
+      "type": "VideoSilentFilmPrintingDirt",
+      "widgets": [
+        0,
+        "dust",
+        10,
+        0.12,
+        48,
+        0.6,
+        0.35,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 18,
+      "type": "VideoSilentFilmPositiveDevelopment",
+      "widgets": [
+        0,
+        "streaks",
+        8,
+        0.15,
+        48,
+        0.6,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 19,
+      "type": "VideoSilentFilmPositiveDamage",
+      "widgets": [
+        0.03,
+        "scratches",
+        "emulsion_loss",
+        2,
+        0.07,
+        10,
+        0.6,
+        0.7,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1930
+      }
+    },
+    {
+      "node": 20,
+      "type": "VideoSilentFilmProjectorDirt",
+      "widgets": [
+        0,
+        "dust",
+        5,
+        0.3,
+        48,
+        0.6,
+        0.5,
+        0.2,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1925
+      }
+    },
+    {
+      "node": 28,
+      "type": "VideoSilentFilmPositiveDamage",
+      "widgets": [
+        0.03,
+        "scratches",
+        "dirty",
+        1.5,
+        0.12,
+        20,
+        0.5,
+        1,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 2022
+      }
+    },
+    {
+      "node": 32,
+      "type": "VideoSilentFilmNegativeDamage",
+      "widgets": [
+        0.5,
+        "dust",
+        "emulsion_loss",
+        7,
+        0.15,
+        24,
+        0.6,
+        0,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1922
+      }
+    },
+    {
+      "node": 33,
+      "type": "VideoSilentFilmNegativeDamage",
+      "widgets": [
+        1,
+        "dust",
+        "surface",
+        10,
+        0.1,
+        24,
+        0.6,
+        0,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1921
+      }
+    },
+    {
+      "node": 39,
+      "type": "VideoSilentFilmNegativeDamage",
+      "widgets": [
+        0.1,
+        "dust",
+        "dirty",
+        3,
+        0.3,
+        24,
+        0.6,
+        0,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1919
+      }
+    },
+    {
+      "node": 40,
+      "type": "VideoSilentFilmNegativeDamage",
+      "widgets": [
+        0.3,
+        "dust",
+        "emulsion_loss",
+        7,
+        0.15,
+        24,
+        0.6,
+        0,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1918
+      }
+    },
+    {
+      "node": 41,
+      "type": "VideoSilentFilmNegativeDamage",
+      "widgets": [
+        0.5,
+        "dust",
+        "surface",
+        10,
+        0.1,
+        24,
+        0.6,
+        0,
+        0,
+        1925,
+        "fixed",
+        "auto",
+        10
+      ],
+      "linked_seeds": {
+        "seed": 1917
+      }
+    }
+  ]
+}

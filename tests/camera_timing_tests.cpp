@@ -36,6 +36,12 @@ void projectedFrames()
         captured.push_back(shot);
     }
     require(longest / shortest > 2.5, "10-30 FPS did not produce a substantial projection speed variation");
+    schedule.clear(); schedule.clear();
+    for (std::size_t i = captured.size(); i-- > 0;) {
+        const auto rebuilt = schedule.captureAtIndex(static_cast<std::int64_t>(i), settings);
+        require(rebuilt.start == captured[i].start && rebuilt.end == captured[i].end && rebuilt.fps == captured[i].fps,
+            "Purging crank intervals changed the reconstructed capture");
+    }
     require(schedule.projectedIntervalAt(0, duration, settings).frame == 0, "Projection lost the first capture");
     require(schedule.projectedIntervalAt(duration, duration, settings).frame == last.frame, "Projection did not reach the last capture");
     // Уже построенная таблица более длинного клипа не должна менять коэффициент проекции.

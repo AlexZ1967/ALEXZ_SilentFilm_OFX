@@ -24,6 +24,12 @@ double normal(std::uint32_t seed, std::size_t frame, int lane)
 
 } // namespace
 
+void ProjectorSignalCache::clear()
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::array<float, 4>>{}.swap(signals_);
+}
+
 ProjectorFrameState ProjectorSignalCache::at(std::size_t frame, std::size_t count, std::uint32_t seed,
     float weave, float flicker, float breathing)
 {

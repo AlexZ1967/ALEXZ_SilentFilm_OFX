@@ -1,6 +1,7 @@
 #include "media_io.hpp"
 #include "flow_sampler.hpp"
 #include "silentfilm/cadence.hpp"
+#include "silentfilm/crank_exposure.hpp"
 
 #ifdef SILENTFILM_CLI_CUDA
 #include <cuda_runtime_api.h>
@@ -106,6 +107,7 @@ struct Settings {
     std::string input, format = "prores", device = "cuda";
     std::string outputName;
     bool splitCamera = false;
+    bool exposureViaOfx = false;
     bool frameProvider = false;
     std::string blurMode = "simple";
     double outputFps = 25, expectedSourceFps = 0, sourceFps = 0;
@@ -143,6 +145,10 @@ Settings parse(Values values)
     if (processing != "full_camera" && processing != "capture_rgb")
         throw std::runtime_error("Processing must be full_camera or capture_rgb");
     s.splitCamera = processing == "capture_rgb";
+    const auto exposureMode = get("exposure_mode", "bake");
+    if (exposureMode != "bake" && exposureMode != "ofx") throw std::runtime_error("exposure_mode must be bake or ofx");
+    s.exposureViaOfx = exposureMode == "ofx";
+    if (s.exposureViaOfx && !s.splitCamera) throw std::runtime_error("Exposure via OFX requires processing=capture_rgb");
     if (s.splitCamera) for (const auto* key : {"focus_seed", "vignette", "edge_softness", "softness", "focus_drift", "edge_start", "edge_end"}) {
         if (values.find(key) != values.end())
             throw std::runtime_error(std::string("Optics parameter belongs to Camera Optics, not capture_rgb: ") + key);
@@ -431,6 +437,7 @@ void render(Job& job, const Settings& s)
     job.status["pixel_aspect_ratio"] = std::to_string(aspect.numerator) + ":" + std::to_string(aspect.denominator);
     AsyncWriter writer(job.directory, s.format, reader.width(), reader.height(), s.outputFps, s.outputName, aspect);
     std::ofstream map(job.directory / "capture_map.csv"); map.exceptions(std::ios::failbit | std::ios::badbit);
+    std::vector<float> exposureGains;
     map << std::setprecision(17) << "output_frame,capture_start_seconds,capture_end_seconds,capture_fps,source_center_frame,exposure_frames,exposure_gain\n";
     HandCrankSchedule schedule;
     std::vector<Pixel> pixels(static_cast<std::size_t>(reader.width()) * reader.height());
@@ -476,7 +483,7 @@ void render(Job& job, const Settings& s)
         optics.captureOnly = s.splitCamera;
         if (!s.splitCamera) optics.focusSignal = cameraFocusSignal(capture, s.camera.focusSeed);
         #ifdef SILENTFILM_CLI_CUDA
-        if (gpu) gpu->render(reader, indices, s.camera, optics, plan.gain, capture, pixels, flow.get());
+        if (gpu) gpu->render(reader, indices, s.camera, optics, s.exposureViaOfx ? 1.0f : plan.gain, capture, pixels, flow.get());
         else
         #endif
         {
@@ -499,13 +506,14 @@ void render(Job& job, const Settings& s)
                 samples[i] = {left, p.phase, right, p.mix, p.weight};
             }
             if (!renderCameraCaptureCpu(samples.data(), static_cast<int>(indices.size()), view(pixels, reader.width(), reader.height()),
-                {0, 0, reader.width(), reader.height()}, optics, plan.gain, s.camera.shake, s.camera.crank.seed,
+                {0, 0, reader.width(), reader.height()}, optics, s.exposureViaOfx ? 1.0f : plan.gain, s.camera.shake, s.camera.crank.seed,
                 [](void* p) { return static_cast<Job*>(p)->cancelled(); }, &job)) throw std::runtime_error("Camera render cancelled or failed");
         }
         if (job.cancelled()) throw std::runtime_error("Cancelled");
         writer.write(pixels, written, job);
         map << written << ',' << interval.start << ',' << interval.end << ',' << interval.fps << ','
             << plan.sourceCenter + s.start << ',' << plan.exposureFrames << ',' << plan.gain << '\n';
+        exposureGains.push_back(plan.gain);
         ++written;
         job.status["frames_written"] = std::to_string(writer.written());
         job.status["frames_submitted"] = std::to_string(written);
@@ -524,12 +532,17 @@ void render(Job& job, const Settings& s)
     if (job.cancelled()) throw std::runtime_error("Cancelled");
     job.update("finishing", "Завершение файла");
     writer.finish(); map.close();
+    const auto exposurePath = fs::absolute(job.directory / "exposure.sfexposure");
+    writeCrankExposureMap(exposurePath.string(), s.outputFps, exposureGains, !s.exposureViaOfx);
     if (job.cancelled()) throw std::runtime_error("Cancelled");
     if (writer.written() != written) throw std::runtime_error("Encoder did not finish all physical captures");
     job.status["frames_written"] = std::to_string(written);
     Values result = job.status;
     result["state"] = "complete"; result["input"] = s.input; result["format"] = writer.format();
     result["media_path"] = fs::absolute(writer.mediaPath()).string();
+    result["exposure_mode"] = s.exposureViaOfx ? "ofx" : "bake";
+    result["exposure_map_path"] = exposurePath.string();
+    result["exposure_ofx_id"] = "com.alexz.silentfilm.crankexposure";
     result["frame_count"] = std::to_string(written); result["first_index"] = "0";
     result["last_index"] = std::to_string(written - 1); result["source_start_frame"] = std::to_string(s.start);
     result["source_frame_count"] = std::to_string(length); result["source_duration"] = number(static_cast<double>(length) / fps);
@@ -566,7 +579,7 @@ int main(int argc, char** argv)
 {
     std::signal(SIGINT, signalHandler); std::signal(SIGTERM, signalHandler);
     if (argc == 2 && std::string(argv[1]) == "--capabilities") {
-        std::cout << "{\"camera_parameter_schema\":2,\"native_timeline_source\":true,\"resolve_frame_provider\":true,\"max_blur_samples\":" << maximumCameraExposureSamples;
+        std::cout << "{\"camera_parameter_schema\":2,\"exposure_ofx\":true,\"native_timeline_source\":true,\"resolve_frame_provider\":true,\"max_blur_samples\":" << maximumCameraExposureSamples;
 #ifdef SILENTFILM_CADENCE_OPENCV
         std::cout << ",\"optical_flow\":true,\"flow_backend\":\"opencv_cpu_farneback_warp\"}\n";
 #else

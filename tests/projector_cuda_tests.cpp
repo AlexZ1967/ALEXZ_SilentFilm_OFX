@@ -1,5 +1,6 @@
 #include "silentfilm/film_optics.hpp"
 
+#include <cuda.h>
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -49,7 +51,7 @@ void run(int width, int height, bool suppliedStream, bool reverse)
     cudaStream_t stream = nullptr;
     if (suppliedStream) requireCuda(cudaStreamCreate(&stream));
     try {
-        // Cache уничтожается до тестового stream; production cleanup не меняет context потока хоста.
+        // Cache уничтожается до stream; исходный context потока восстанавливается после cleanup.
         silentfilm::ProjectorCudaCache cache;
         requireCuda(cudaMemcpyAsync(source.device, source.host.data(), source.host.size() * sizeof(silentfilm::Pixel), cudaMemcpyHostToDevice, stream));
         for (auto transfer : {silentfilm::Transfer::Linear, silentfilm::Transfer::SRGB, silentfilm::Transfer::Gamma24}) {
@@ -89,6 +91,64 @@ void run(int width, int height, bool suppliedStream, bool reverse)
     if (suppliedStream) requireCuda(cudaStreamDestroy(stream));
 }
 
+/** Exercise bounded plan ownership, purge/rebuild and cleanup after the host destroys its stream. */
+void lifecycle()
+{
+    const auto check = [](bool value, const char* message) { if (!value) throw std::runtime_error(message); };
+    const auto driver = [](CUresult status) { if (status != CUDA_SUCCESS) throw std::runtime_error("CUDA context lifecycle call failed"); };
+    Buffer source(37, 23, 0, 0, false), output(37, 23, 0, 0, false);
+    struct Stream {
+        cudaStream_t value = nullptr;
+        Stream() { requireCuda(cudaStreamCreate(&value)); }
+        ~Stream() { if (value) cudaStreamDestroy(value); }
+        void destroy() { requireCuda(cudaStreamDestroy(value)); value = nullptr; }
+    } stream;
+    requireCuda(cudaMemsetAsync(source.device, 0, source.host.size() * sizeof(silentfilm::Pixel), stream.value));
+    silentfilm::ProjectorCudaCache cache;
+    silentfilm::ProjectorParameters p;
+    p.transfer = silentfilm::Transfer::Linear; p.glowStrength = 0.5f;
+    const auto render = [&](silentfilm::ProjectorCudaCache& target, int width) {
+        auto input = source.view(true), destination = output.view(true);
+        input.x2 = destination.x2 = width;
+        const auto status = target.render(input, destination, {0, 0, width, 23}, p, stream.value, true);
+        check(!status.code, status.message ? status.message : "Lifecycle render failed");
+    };
+    CUcontext original = nullptr, after = nullptr;
+    driver(cuCtxGetCurrent(&original));
+    for (std::size_t i = 0; i < silentfilm::ProjectorCudaCache::maximumPlanSets + 4; ++i) {
+        render(cache, 7 + static_cast<int>(i));
+        check(cache.cachedPlanCount() <= silentfilm::ProjectorCudaCache::maximumPlanSets, "cuFFT cache grew beyond its limit");
+    }
+    check(cache.cachedPlanCount() == silentfilm::ProjectorCudaCache::maximumPlanSets, "Lifecycle fixture did not fill the plan cache");
+    driver(cuCtxGetCurrent(&after));
+    check(after == original, "Eviction changed the caller CUDA context");
+
+    // DestroyInstance/PurgeCaches могут прийти на потоке без текущего CUDA context.
+    CUcontext removed = nullptr;
+    driver(cuCtxPopCurrent(&removed));
+    struct RestoreContext {
+        CUcontext value;
+        ~RestoreContext() { if (value) cuCtxPushCurrent(value); }
+    } restore{removed};
+    const auto cleared = cache.clear();
+    check(!cleared.code, cleared.message ? cleared.message : "Purge failed without a current context");
+    driver(cuCtxGetCurrent(&after));
+    check(after == nullptr, "Purge failed to restore an empty caller context stack");
+    driver(cuCtxPushCurrent(removed)); restore.value = nullptr;
+    check(cache.cachedPlanCount() == 0, "Purge retained FFT plans");
+    check(!cache.clear().code, "Repeated purge is not idempotent");
+    render(cache, 17);
+    check(cache.cachedPlanCount() == 1, "Render after purge failed to rebuild plans");
+    auto pending = std::make_unique<silentfilm::ProjectorCudaCache>();
+    render(*pending, 19);
+    // Без предварительной синхронизации: cleanup использует своё событие, не мёртвый stream.
+    stream.destroy();
+    check(!cache.clear().code, "Purge used a destroyed host stream");
+    pending.reset();
+    driver(cuCtxGetCurrent(&after));
+    check(after == original, "Destruction changed the caller CUDA context");
+}
+
 } // namespace
 
 int main()
@@ -100,6 +160,7 @@ int main()
             std::cout << "Projector CUDA parity: SKIP (no CUDA device)\n"; return 77;
         }
         requireCuda(status);
+        lifecycle();
         for (bool supplied : {false, true}) for (bool reverse : {false, true}) {
             run(1, 1, supplied, reverse); run(7, 5, supplied, reverse);
             run(33, 19, supplied, reverse); run(257, 43, supplied, reverse);

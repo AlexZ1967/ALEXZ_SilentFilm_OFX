@@ -3,6 +3,10 @@
 #include "silentfilm/optics.hpp"
 #include "silentfilm/film_optics.hpp"
 #include "silentfilm/camera_capture.hpp"
+#include "silentfilm/workflow_presets.hpp"
+#include "silentfilm/defects_pixel.hpp"
+#include "silentfilm/color_contract.hpp"
+#include "silentfilm/crank_exposure.hpp"
 
 #include <ofxImageEffect.h>
 #include <ofxGPURender.h>
@@ -36,11 +40,12 @@ constexpr const char* gainName = "diagnostic_gain_ev";
 constexpr const char* mixName = "temporal_mix";
 constexpr const char* offsetName = "temporal_offset";
 
-enum class EffectKind { Probe, Camera, CameraOptics, Negative, Print, Projector, Defects };
+enum class EffectKind { Probe, Camera, CameraOptics, Negative, Print, Projector, Defects, CrankExposure };
 
 /** Keep independent plugin names and identifiers within one shared adapter. */
 const char* effectName(EffectKind kind)
 {
+    if (kind == EffectKind::CrankExposure) return "SilentFilm Crank Exposure";
     if (kind == EffectKind::Negative) return "SilentFilm Negative";
     if (kind == EffectKind::Print) return "SilentFilm Print";
     if (kind == EffectKind::Projector) return "SilentFilm Projector";
@@ -98,6 +103,8 @@ OfxPropertySetHandle effectProperties(OfxImageEffectHandle effect)
 }
 
 struct Instance {
+    OfxParamHandle exposureMap = nullptr, exposureBlend = nullptr, exposureOffset = nullptr;
+    silentfilm::CrankExposureMapCache exposureMaps;
     EffectKind kind = EffectKind::Probe;
     OfxImageClipHandle source = nullptr;
     OfxImageClipHandle output = nullptr;
@@ -116,6 +123,7 @@ struct Instance {
     OfxParamHandle exposureVariation = nullptr;
     OfxParamHandle exposureSamples = nullptr, cameraShake = nullptr, cameraSeed = nullptr;
     silentfilm::HandCrankSchedule crankSchedule;
+    silentfilm::CameraFocusCache focusSignals;
     OfxParamHandle glowStrength = nullptr, glowSize = nullptr;
     OfxParamHandle gateWeave = nullptr, lampFlicker = nullptr, lampBreathing = nullptr, projectorSeed = nullptr;
     silentfilm::ProjectorSignalCache projectorSignals;
@@ -123,7 +131,12 @@ struct Instance {
     silentfilm::ProjectorCudaCache projectorCuda;
 #endif
     OfxParamHandle defectMaterial = nullptr, defectPattern = nullptr, defectStrength = nullptr, defectSize = nullptr;
+    OfxParamHandle defectBlend = nullptr;
+    OfxParamHandle defectMixResponse = nullptr;
     OfxParamHandle defectAmount = nullptr, defectPersistence = nullptr, defectSeed = nullptr;
+    OfxParamHandle defectSizeSpread = nullptr, defectThicknessSpread = nullptr, defectEdgeBias = nullptr;
+    OfxParamHandle defectScratchWander = nullptr, defectScratchWanderTime = nullptr;
+    OfxParamHandle defectAmountVariation = nullptr, defectAmountDriftTime = nullptr;
 };
 
 /** Fetch instance state without storing image handles across render actions. */
@@ -161,12 +174,14 @@ Settings settingsAt(Instance& state, double time)
     return value;
 }
 
+void sourceFrameRange(OfxImageClipHandle clip, double range[2]);
+
 /** Evaluate exposure/development controls independently from the diagnostic effect. */
 silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
 {
     double exposure = 0, contrast = 1, shadow = 0, highlight = 0, fog = 0, grainStrength = 0, grainSize = 2;
     double halationStrength = 0, halationSize = 0.15;
-    int encoding = 0, preview = 0;
+    int encoding = static_cast<int>(silentfilm::color::pipelineTransfer), preview = 0;
     int grainSeed = 1925;
     require(parameters->paramGetValueAtTime(state.exposure, time, &exposure), "read film exposure");
     require(parameters->paramGetValueAtTime(state.contrast, time, &contrast), "read film contrast");
@@ -206,8 +221,9 @@ silentfilm::EmulsionParameters filmSettingsAt(Instance& state, double time)
     value.grainSize = static_cast<float>(grainSize);
     value.grainSeed = static_cast<std::uint32_t>(grainSeed)
         ^ (state.kind == EffectKind::Negative ? 0x4e454741u : 0x5052494eu);
-    const float frameTime = static_cast<float>(time);
-    std::memcpy(&value.grainFrame, &frameTime, sizeof(frameTime));
+    double range[2]{};
+    sourceFrameRange(state.source, range);
+    value.grainFrame = static_cast<std::uint32_t>(std::floor(std::clamp(time - range[0], 0.0, 4294967294.0) + 1e-9));
     value.previewPositive = preview != 0;
     return value;
 }
@@ -246,7 +262,8 @@ silentfilm::CameraOpticsParameters cameraSettingsAt(Instance& state, double time
     }
     value.softness = static_cast<float>(globalSoftness);
     value.focusDrift = static_cast<float>(drift);
-    if (drift > 0) value.focusSignal = silentfilm::cameraFocusSignal(captureFrame, static_cast<std::uint32_t>(seed));
+    if (drift > 0 && state.kind != EffectKind::CameraOptics)
+        value.focusSignal = silentfilm::cameraFocusSignal(captureFrame, static_cast<std::uint32_t>(seed));
 
     return value;
 }
@@ -459,6 +476,8 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     require(properties->propSetString(props, kOfxImageEffectPluginPropGrouping, 0, "ALEXZ/SilentFilm"), "plugin group");
     const char* description = kind == EffectKind::Probe
         ? "Диагностический эффект для проверки усиления и доступа к соседним кадрам на CPU/CUDA. Это не плёночный вид."
+        : kind == EffectKind::CrankExposure
+        ? "Экспозиция ручки по точной карте выходных кадров Cadence. Выбери exposure.sfexposure результата Exposure via OFX, затем регулируй Blend без пересчёта каденса. Вход sRGB, до Camera Optics/Negative; CPU/CUDA."
         : kind == EffectKind::CameraOptics
         ? "Оптика подготовленных кадров: виньетка и краевой расфокус с общей маской edge_start/end, случайное гуляние фокуса и глобальная мягкость. Экспозиция и движение ручки рассчитываются в приложении Cadence."
         : kind == EffectKind::Camera
@@ -482,7 +501,8 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     require(properties->propSetInt(props, kOfxImageEffectPropTemporalClipAccess, 0,
         (kind == EffectKind::Probe || kind == EffectKind::Camera) && temporalAccess ? 1 : 0), "temporal capability");
 #ifdef SILENTFILM_ENABLE_CUDA
-    if (kind == EffectKind::Probe || kind == EffectKind::Camera || kind == EffectKind::CameraOptics || kind == EffectKind::Projector) {
+    if (kind == EffectKind::Probe || kind == EffectKind::Camera || kind == EffectKind::CameraOptics || kind == EffectKind::Projector
+        || kind == EffectKind::Negative || kind == EffectKind::Print || kind == EffectKind::Defects) {
         optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true"), "CUDA capability");
         optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true"), "CUDA stream capability");
     }
@@ -517,6 +537,126 @@ OfxPropertySetHandle defineControlsPage(OfxParamSetHandle set)
     return page;
 }
 
+/** Put standalone transfer overrides in a collapsed group while retaining saved parameter IDs. */
+void defineAdvancedColor(OfxParamSetHandle set)
+{
+    OfxPropertySetHandle group = nullptr;
+    require(parameters->paramDefine(set, kOfxParamTypeGroup, "advanced_color", &group), "define advanced color group");
+    require(properties->propSetString(group, kOfxPropLabel, 0, "Advanced — Color Encoding"), "advanced color label");
+    require(properties->propSetInt(group, kOfxParamPropGroupOpen, 0, 0), "advanced color collapsed");
+    optionalProperty(properties->propSetString(group, kOfxParamPropHint, 0,
+        "Обычная цепочка Comfy использует sRGB / Rec.709 на входе и после Print. Между Negative и Print идут физические данные плёнки. Ручная гамма нужна для отдельных нод или прежних проектов; она не преобразует автоматически рабочее пространство Resolve. Comfy color only меняет только гамму, сохраняя настройки эффекта."), "advanced color hint");
+}
+
+/** Disable the transfer override when this defect instance processes physical film data. */
+void updateDefectColorUi(Instance& state, double time)
+{
+    if (state.kind != EffectKind::Defects) return;
+    int material = 0;
+    require(parameters->paramGetValueAtTime(state.defectMaterial, time, &material), "defect color UI material");
+    const bool physical = silentfilm::color::filmTransmission(static_cast<silentfilm::DefectMaterial>(material));
+    OfxPropertySetHandle props = nullptr;
+    require(parameters->paramGetPropertySet(state.encoding, &props), "defect color UI properties");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropEnabled, 0, physical ? 0 : 1), "defect encoding enabled");
+    optionalProperty(properties->propSetString(props, kOfxPropLabel, 0,
+        physical ? "Film transmission — no gamma" : "Image Encoding"), "defect encoding role label");
+    int pattern = 0;
+    double wander = 0, variation = 0;
+    require(parameters->paramGetValueAtTime(state.defectPattern, time, &pattern), "defect pattern UI value");
+    require(parameters->paramGetValueAtTime(state.defectScratchWander, time, &wander), "defect wander UI value");
+    require(parameters->paramGetValueAtTime(state.defectAmountVariation, time, &variation), "defect amount variation UI value");
+    const bool particles = pattern != static_cast<int>(silentfilm::DefectPattern::Development);
+    const bool scratches = pattern == static_cast<int>(silentfilm::DefectPattern::Scratches);
+    const auto enabled = [](OfxParamHandle handle, bool value) {
+        OfxPropertySetHandle prop = nullptr;
+        require(parameters->paramGetPropertySet(handle, &prop), "defect shape UI properties");
+        optionalProperty(properties->propSetInt(prop, kOfxParamPropEnabled, 0, value ? 1 : 0), "defect shape control enabled");
+    };
+    enabled(state.defectSizeSpread, particles && !scratches);
+    enabled(state.defectThicknessSpread, scratches);
+    enabled(state.defectEdgeBias, particles);
+    enabled(state.defectScratchWander, scratches);
+    enabled(state.defectScratchWanderTime, scratches && wander > 0);
+    enabled(state.defectAmount, particles);
+    enabled(state.defectAmountVariation, particles);
+    enabled(state.defectAmountDriftTime, particles && variation > 0);
+}
+
+/** Map effect identity to the explicit workflow preset table. */
+silentfilm::ReferenceStage referenceStage(EffectKind kind)
+{
+    switch (kind) {
+    case EffectKind::Camera: return silentfilm::ReferenceStage::Camera;
+    case EffectKind::CameraOptics: return silentfilm::ReferenceStage::CameraOptics;
+    case EffectKind::Negative: return silentfilm::ReferenceStage::Negative;
+    case EffectKind::Print: return silentfilm::ReferenceStage::Print;
+    case EffectKind::Projector: return silentfilm::ReferenceStage::Projector;
+    default: return silentfilm::ReferenceStage::Defects;
+    }
+}
+
+/** Append user-triggered reference presets without changing existing project values on load. */
+void defineReferenceControls(OfxParamSetHandle set, OfxPropertySetHandle page, EffectKind kind)
+{
+    OfxPropertySetHandle choice = nullptr, button = nullptr;
+    require(parameters->paramDefine(set, kOfxParamTypeChoice, "reference_preset", &choice), "define reference preset");
+    require(properties->propSetString(choice, kOfxPropLabel, 0, "Reference Preset"), "reference preset label");
+    require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "reference preset default");
+    optionalProperty(properties->propSetInt(choice, kOfxParamPropAnimates, 0, 0), "reference preset animation");
+    const auto presets = silentfilm::referencePresets(referenceStage(kind));
+    for (std::size_t i = 0; i < presets.size(); ++i)
+        require(properties->propSetString(choice, kOfxParamPropChoiceOption, static_cast<int>(i), presets[i].label), "reference preset option");
+    optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
+        kind == EffectKind::Defects
+            ? "Доступные параметры отдельных нод with_defects. Mapped означает частичный перенос: тип повреждения, мягкость и движение ещё не эквивалентны Comfy. Для точного сравнения зерна сначала отключи Defects."
+            : "Настройки из Видео-в-Хронику-по-этапам_with_defects.json. Выбор списка сам по себе ничего не меняет: нажми Apply Reference Preset. Для чистого A/B используй новую ноду без анимации. Print в workflow имеет grain_strength=0; Grain only включает собственное зерно позитива отдельно."), "reference preset hint");
+    require(parameters->paramDefine(set, kOfxParamTypePushButton, "apply_reference_preset", &button), "define apply reference preset");
+    require(properties->propSetString(button, kOfxPropLabel, 0, "Apply Reference Preset"), "apply reference label");
+    int children = 0;
+    require(properties->propGetDimension(page, kOfxParamPropPageChild, &children), "reference page dimension");
+    require(properties->propSetString(page, kOfxParamPropPageChild, children, "reference_preset"), "reference page choice");
+    require(properties->propSetString(page, kOfxParamPropPageChild, children + 1, "apply_reference_preset"), "reference page button");
+}
+
+/** Apply a preset on its button action and group all parameter edits into one undo entry. */
+OfxStatus changed(OfxImageEffectHandle effect, OfxPropertySetHandle in)
+{
+    char* name = nullptr;
+    require(properties->propGetString(in, kOfxPropName, 0, &name), "changed parameter name");
+    if (name && instance(effect).kind == EffectKind::CrankExposure
+        && (std::strcmp(name, "exposure_map") == 0 || std::strcmp(name, "reload_map") == 0)) {
+        instance(effect).exposureMaps.clear();
+        return kOfxStatOK;
+    }
+    if (name && instance(effect).kind == EffectKind::Defects
+        && (std::strcmp(name, "material") == 0 || std::strcmp(name, "pattern") == 0
+            || std::strcmp(name, "scratch_wander") == 0 || std::strcmp(name, "amount_variation") == 0)) {
+        updateDefectColorUi(instance(effect), actionTime(in));
+        return kOfxStatOK;
+    }
+    if (!name || std::strcmp(name, "apply_reference_preset") != 0) return kOfxStatReplyDefault;
+    OfxParamSetHandle set = nullptr;
+    require(effects->getParamSet(effect, &set), "preset parameter set");
+    OfxParamHandle choice = nullptr;
+    require(parameters->paramGetHandle(set, "reference_preset", &choice, nullptr), "reference preset handle");
+    int index = 0;
+    require(parameters->paramGetValue(choice, &index), "reference preset selection");
+    const auto presets = silentfilm::referencePresets(referenceStage(instance(effect).kind));
+    if (index < 0 || static_cast<std::size_t>(index) >= presets.size()) return kOfxStatErrValue;
+    require(parameters->paramEditBegin(set, "Apply SilentFilm reference preset"), "begin reference preset edit");
+    try {
+        for (const auto& value : presets[static_cast<std::size_t>(index)].values) {
+            OfxParamHandle parameter = nullptr;
+            require(parameters->paramGetHandle(set, value.id, &parameter, nullptr), "preset target handle");
+            require(value.integer ? parameters->paramSetValue(parameter, static_cast<int>(value.value))
+                : parameters->paramSetValue(parameter, value.value), "apply reference value");
+        }
+    } catch (...) { parameters->paramEditEnd(set); throw; }
+    require(parameters->paramEditEnd(set), "end reference preset edit");
+    if (instance(effect).kind == EffectKind::Defects) updateDefectColorUi(instance(effect), actionTime(in));
+    return kOfxStatOK;
+}
+
 /** Define readable material controls and an explicit input/output transfer. */
 void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
 {
@@ -540,8 +680,8 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     defineDouble(set, "halation_size", "Halation Size",
         "Sigma возвратного света в процентах ширины кадра: 0,15 даёт около 3 px при 1920 px. Ореол круглый и рассчитан в линейном/физическом сигнале. Размер не зависит от render window.", 0.01, 5, 0.15);
     defineDouble(set, "grain_strength", "Emulsion Grain",
-        negative ? "Сила многослойного зерна в оптической плотности негатива. 0 — выключено; начните с 0,02–0,04. Зерно негатива проходит через Print и появляется в позитиве. Для повторяемого рисунка используйте один Grain Seed."
-                 : "Сила многослойного зерна позитивной эмульсии. 0 — выключено; начните с 0–0,015, поскольку зерно негатива уже отпечатано. Зерно добавляется в плотность и зависит от Grain Size и Grain Seed.", 0, 0.2);
+        negative ? "Кластерное зерно в оптической плотности негатива, как в Comfy: четыре нормализованных масштаба. В рабочем workflow сила 0,01 и размер 2. Через Print это зерно остаётся в позитиве, даже если собственное зерно Print выключено. 0 выключает. Не путайте с отдельными пятнами проявки и повреждениями."
+                 : "Собственное кластерное зерно позитивной эмульсии, добавляемое в плотность после печати. В рабочем Comfy workflow оно выключено (0), зерно негатива уже отпечатано. Пресет Grain only включает 0,01 для отдельного сравнения. Seed позитивной эмульсии независим от негатива.", 0, 0.2);
     defineDouble(set, "grain_size", "Grain Size",
         "Масштаб структуры относительно ширины кадра 1920 px. Значение 2 — стартовое; 1 даёт более мелкую, 3 — более крупную фактуру. Масштаб меняется вместе с разрешением и proxy; это не диаметр отдельного зерна.", 0.1, 16, 2);
     require(parameters->paramDefine(set, kOfxParamTypeInteger, "grain_seed", &props), "define grain seed");
@@ -552,12 +692,14 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     require(properties->propSetInt(props, kOfxParamPropMax, 0, 2147483647), "grain seed maximum");
     require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, 0), "grain seed display minimum");
     require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 2147483647), "grain seed display maximum");
+    defineAdvancedColor(set);
     require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &props), "define film encoding");
+    require(properties->propSetString(props, kOfxParamPropParent, 0, "advanced_color"), "film encoding group");
     require(properties->propSetString(props, kOfxPropLabel, 0, negative ? "Input Encoding" : "Output Encoding"), "encoding label");
     optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0,
-        negative ? "Кодирование входного SDR-сигнала с первичными Rec.709. Выберите Linear Rec.709, sRGB или Gamma 2.4 по фактическому сигналу до ноды. Не угадывайте по виду картинки. Для Log, DaVinci Wide Gamut или ACES сначала задайте явный CST в Rec.709 Linear."
-                 : "Кодирование готового SDR-позитива. Для нейтральной пары согласуйте его с Input Encoding у Negative. На вход Print получает физическое пропускание негатива: не ставьте CST, LUT или цветокоррекцию между Negative и Print."), "encoding hint");
-    require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "encoding default");
+        negative ? "Для обычной цепочки оставь sRGB / Rec.709, как у Camera Optics и Comfy. Входной CST должен действительно привести изображение к этому сигналу; выбор пункта сам по себе не преобразует пространство Resolve. Linear/Gamma 2.4 нужны только при самостоятельном использовании Negative с соответствующим входом."
+                 : "Обычный выход цепочки — sRGB / Rec.709, как ожидают Positive Defects и Projector. На входе Print физическое пропускание: оно не декодируется этой настройкой. CST обратно в пространство таймлайна ставится после Projector. Ручной override сохраняется для отдельных нод и старых проектов."), "encoding hint");
+    require(properties->propSetInt(props, kOfxParamPropDefault, 0, static_cast<int>(silentfilm::color::pipelineTransfer)), "encoding default");
     require(properties->propSetString(props, kOfxParamPropChoiceOption, 0, "Linear Rec.709"), "linear encoding");
     require(properties->propSetString(props, kOfxParamPropChoiceOption, 1, "sRGB"), "sRGB encoding");
     require(properties->propSetString(props, kOfxParamPropChoiceOption, 2, "Rec.709 Gamma 2.4"), "gamma encoding");
@@ -573,6 +715,7 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
         require(properties->propSetString(props, kOfxParamPropPageChild, index++, name), "film page control");
     }
     if (negative) require(properties->propSetString(props, kOfxParamPropPageChild, index, "preview_positive"), "film page preview");
+    defineReferenceControls(set, page, kind);
 }
 
 /** Define the first stateless camera-optics controls independently from cadence. */
@@ -610,10 +753,10 @@ void defineCameraControls(OfxParamSetHandle set, bool opticsOnly = false)
     defineDouble(set, "edge_softness", opticsOnly ? "edge_softness" : "Edge Softness",
         "Переменный расфокус по виньеточной маске: в центре резкость сохраняется, к краям радиус размытия растёт. 0 выключает; начните с 0,02–0,04, 0,15 уже заметно. При 1920 px значение 0,15 даёт максимальную sigma около 7,2 px. Маску задают edge_start и edge_end.", 0, 1, 0.15, opticsOnly ? "lens_edges" : nullptr);
     defineDouble(set, "camera_softness", opticsOnly ? "softness" : "Global Softness",
-        "Общая оптическая мягкость съёмки до негатива. 0 сохраняет резкость; начните с 0,05–0,12. Использует separable Gaussian из модели Comfy.", 0, 1, 0.1, opticsOnly ? "focus_optics" : nullptr);
+        "Равномерный расфокус всего кадра, включая центр. 0 выключает; 0,05–0,12 — лёгкая мягкость. Sigma = ширина / 1920 × softness × 4: при 1920 px значение 0,1 даёт 0,4 px, 0,5 даёт 2 px. Не зависит от виньетки. Гуляющий фокус добавляется поверх этой мягкости; альфа сохраняется.", 0, 1, 0.1, opticsOnly ? "focus_optics" : nullptr);
     defineDouble(set, "focus_drift", opticsOnly ? "focus_drift_strength" : "Focus Drift",
         opticsOnly
-            ? "Случайное гуляние фокуса по кадрам результата Cadence. 0 выключает; 0,02–0,04 — деликатное дыхание резкости, 0,1 уже заметно. При перемотке рисунок воспроизводится."
+            ? "Гуляющий расфокус поверх softness: сглаженный случайный сигнал по кадрам клипа, как в Comfy. 0 выключает; 0,02–0,04 — деликатно, 0,1–0,3 — для проверки. Максимальная sigma = ширина / 1920 × сила × 8; фактическая меняется от кадра к кадру. При перемотке рисунок воспроизводится. Нормализация зависит от длины клипа; на одном кадре эффект выключен. Seed выбирает рисунок."
             : "Медленно гуляющий фокус, привязанный к кадрам ручной съёмки. 0 выключает; 0,02–0,04 — деликатное дыхание резкости, 0,1 уже заметно. Фокус держится вместе с виртуальным кадром и воспроизводится после перемотки.",
         0, 0.5, 0.03, opticsOnly ? "focus_optics" : nullptr);
     OfxPropertySetHandle focusProps = nullptr;
@@ -669,6 +812,7 @@ void defineCameraControls(OfxParamSetHandle set, bool opticsOnly = false)
         require(properties->propSetString(props, kOfxParamPropPageChild, index,
             opticsOnly ? opticsChildren[index] : children[index]), "camera page control");
     }
+    defineReferenceControls(set, page, opticsOnly ? EffectKind::CameraOptics : EffectKind::Camera);
 }
 
 /** Define shared clip contracts and the UI specific to each registered effect. */
@@ -686,6 +830,31 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
     }
     OfxParamSetHandle set = nullptr;
     require(effects->getParamSet(effect, &set), "parameter set");
+    if (kind == EffectKind::CrankExposure) {
+        const auto page = defineControlsPage(set);
+        defineDouble(set, "blend", "Blend", "Сила сохранённой экспозиции ручки. 0 — без эффекта, 1 — полный расчёт Cadence. Меняется без пересчёта каденса. Применять перед Camera Optics/Negative, только к результату Exposure via OFX; RGB ожидается в sRGB.", 0, 1, 1);
+        OfxPropertySetHandle props = nullptr;
+        require(parameters->paramDefine(set, kOfxParamTypeString, "exposure_map", &props), "define exposure map");
+        require(properties->propSetString(props, kOfxPropLabel, 0, "Exposure Map"), "exposure map label");
+        require(properties->propSetString(props, kOfxParamPropDefault, 0, ""), "exposure map default");
+        require(properties->propSetString(props, kOfxParamPropStringMode, 0, kOfxParamStringIsFilePath), "exposure file picker");
+        require(properties->propSetInt(props, kOfxParamPropAnimates, 0, 0), "exposure map not animated");
+        optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Выбери exposure.sfexposure из папки результата Cadence. Приложение показывает путь после импорта. Это точная карта выходных кадров, не новый случайный шум. Запечённая карта Bake отклоняется. Сохраняй файл вместе с клипом."), "exposure map hint");
+        require(parameters->paramDefine(set, kOfxParamTypeInteger, "frame_offset", &props), "define exposure offset");
+        require(properties->propSetString(props, kOfxPropLabel, 0, "Frame Offset"), "exposure offset label");
+        require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "exposure offset default");
+        require(properties->propSetInt(props, kOfxParamPropMin, 0, -10000000), "exposure offset min");
+        require(properties->propSetInt(props, kOfxParamPropMax, 0, 10000000), "exposure offset max");
+        require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, -10000), "exposure offset display min");
+        require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 10000), "exposure offset display max");
+        require(properties->propSetInt(props, kOfxParamPropAnimates, 0, 0), "exposure offset not animated");
+        optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Номер кадра карты = time минус начало Source Frame Range плюс Frame Offset. После подрезки, если Resolve переобнуляет время OFX, укажи число срезанных кадров. Обычное перемещение клипа не требует сдвига. Изменение скорости готового результата пока не поддержано."), "exposure offset hint");
+        require(parameters->paramDefine(set, kOfxParamTypePushButton, "reload_map", &props), "define map reload");
+        require(properties->propSetString(props, kOfxPropLabel, 0, "Reload Map"), "reload map label");
+        const char* children[] = {"blend", "exposure_map", "frame_offset", "reload_map"};
+        for (int i = 0; i < 4; ++i) require(properties->propSetString(page, kOfxParamPropPageChild, i, children[i]), "exposure page control");
+        return kOfxStatOK;
+    }
     if (kind == EffectKind::Camera || kind == EffectKind::CameraOptics) {
         defineCameraControls(set, kind == EffectKind::CameraOptics);
         return kOfxStatOK;
@@ -713,21 +882,33 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         defineDouble(set, "glow_size", "Glow Size",
             "Sigma ореола в процентах ширины кадра. Значение 1 соответствует около 19 px при ширине 1920. Масштабируется с разрешением.", 0.05, 5, 1);
         OfxPropertySetHandle transfer = nullptr;
+        defineAdvancedColor(set);
         require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &transfer), "define projector transfer");
+        require(properties->propSetString(transfer, kOfxParamPropParent, 0, "advanced_color"), "projector encoding group");
         require(properties->propSetString(transfer, kOfxPropLabel, 0, "Input / Output Encoding"), "projector transfer label");
         optionalProperty(properties->propSetString(transfer, kOfxParamPropHint, 0, "Фактическая transfer curve позитивной копии. После транспорта плёнки RGB декодируется в линейный свет для лампы и glow, затем кодируется обратно. Согласуйте с выходом Print."), "projector transfer hint");
-        require(properties->propSetInt(transfer, kOfxParamPropDefault, 0, 1), "projector transfer default");
+        require(properties->propSetInt(transfer, kOfxParamPropDefault, 0, static_cast<int>(silentfilm::color::pipelineTransfer)), "projector transfer default");
         require(properties->propSetString(transfer, kOfxParamPropChoiceOption, 0, "Linear Rec.709"), "projector linear transfer");
         require(properties->propSetString(transfer, kOfxParamPropChoiceOption, 1, "sRGB"), "projector sRGB transfer");
         require(properties->propSetString(transfer, kOfxParamPropChoiceOption, 2, "Rec.709 Gamma 2.4"), "projector gamma transfer");
         transfer = page;
         const char* controls[] = {"gate_weave_px", "lamp_flicker", "lamp_breathing", "projector_seed", "glow_strength", "glow_size", "encoding"};
         for (int i = 0; i < 7; ++i) require(properties->propSetString(transfer, kOfxParamPropPageChild, i, controls[i]), "projector page control");
+        defineReferenceControls(set, page, kind);
         return kOfxStatOK;
     }
     if (kind == EffectKind::Defects) {
         const auto page = defineControlsPage(set);
+        defineDouble(set, "blend", "Blend",
+            "Общее наложение всей ноды: 0 — исходник, 0,5 — половина результата, 1 — полный результат при выбранном Strength. В режиме Perceptual смешивание негатива учитывает нейтральную печать, чтобы царапины не становились чёрными от малых значений. Альфа сохраняется; 0 полностью пропускает расчёт.", 0, 1, 1);
         OfxPropertySetHandle choice = nullptr;
+        require(parameters->paramDefine(set, kOfxParamTypeChoice, "mix_response", &choice), "define defect mix response");
+        require(properties->propSetString(choice, kOfxPropLabel, 0, "Mix Response"), "defect mix response label");
+        require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "defect mix response default");
+        require(properties->propSetString(choice, kOfxParamPropChoiceOption, 0, "Perceptual — smooth fades"), "perceptual mix option");
+        require(properties->propSetString(choice, kOfxParamPropChoiceOption, 1, "Physical material"), "physical mix option");
+        optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
+            "Perceptual: Strength и Blend плавно регулируют видимый результат. Для Negative/Printing используется нейтральная позитивная калибровка sRGB; физическое пропускание на выходе сохраняется. Physical: прежняя сила маски/плотности и смешивание самого материала; после Print малые значения могут давать сильные полосы. Для A/B физической математики Comfy выбирай Physical. Нестандартная коррекция Print может изменить видимый ход Perceptual."), "defect mix response hint");
         require(parameters->paramDefine(set, kOfxParamTypeChoice, "material", &choice), "define defect material");
         require(properties->propSetString(choice, kOfxPropLabel, 0, "Material Stage"), "defect material label");
         optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0, "Выберите, где находится дефект: Camera, Negative, печатный этап, Positive или после Projector. Подключайте этот эффект в соответствующем месте цепочки."), "defect material hint");
@@ -740,9 +921,24 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         const char* patterns[] = {"Dust", "Scratches", "Stains", "Development"};
         for (int i = 0; i < 4; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i, patterns[i]), "defect pattern option");
         require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "defect pattern default");
-        defineDouble(set, "strength", "Strength", "Общая сила дефекта. 0 выключает; начните с 0,1 для пыли и царапин, 0,03 для пятен проявки.", 0, 1, 0.15);
+        defineDouble(set, "strength", "Strength",
+            "В Perceptual — непрозрачность полного рисунка: 0 выключено, 0,5 половина, 1 полная сила; итоговая доля также умножается на Blend. Размер, seed и рисунок сохраняются. В Physical — прежняя сила маски/плотности материала, её вид после печати может быть нелинейным.", 0, 1, 0.15);
         defineDouble(set, "size", "Size (% width)", "Размер частиц, ширина царапины или размер поля относительно ширины кадра. Для пыли начните с 0,05–0,15; для пятен проявки — 5–15.", 0.01, 50, 0.12);
+        defineDouble(set, "size_spread", "Size Spread (%)",
+            "Разброс размера пылинок/пятен относительно Size. 0 — одинаковый размер; 35 — от 65% до 135% заданного размера. Для царапин используется отдельный Thickness Spread. Не меняет количество и непрозрачность.", 0, 100, 35);
+        defineDouble(set, "thickness_spread", "Thickness Spread (%)",
+            "Разброс толщины между царапинами относительно Size. 0 — одинаковая толщина; 50 — от 50% до 150%. Толщина конкретной царапины сохраняется в пределах Persistence; seed и перемотка воспроизводимы.", 0, 100, 35);
+        defineDouble(set, "edge_bias", "Edge Bias",
+            "Распределение пыли, царапин и пятен: 0 — равномерно, 1 — только у левого и правого краёв, в полосе около 12% ширины кадра. По высоте распределение остаётся равномерным. Промежуточные значения смешивают два распределения.", 0, 1, 0);
+        defineDouble(set, "scratch_wander", "Scratch Wander (px @1920)",
+            "Боковое гуляние царапин по кадрам, без периодической синусоиды. 0 выключает; 2–8 px — старт. Пиксели заданы для ширины 1920 и масштабируются с изображением. Рисунок не зависит от порядка render. Небольшой статический наклон сохраняется отдельно.", 0, 64, 0);
+        defineDouble(set, "scratch_wander_time", "Wander Time (frames)",
+            "Плавность бокового гуляния: число кадров между случайными опорными точками. 1 — живее, как frame-to-frame path Comfy; 8–16 — медленнее и плавнее. Не меняет скорость клипа и Persistence.", 1, 240, 8);
         defineDouble(set, "amount", "Amount", "Среднее количество следов в кадре; дробные значения дают вероятностное число частиц. Учитывается только для пыли, царапин и пятен.", 0, 24, 3);
+        defineDouble(set, "amount_variation", "Amount Variation (%)",
+            "Разброс количества пыли/царапин во времени. 0 — постоянный Amount; 50 — примерно от 0,5 до 1,5 Amount; 100 допускает от 0 до 2 Amount. Плавный случайный ход, не синусоида. Это число следов, а не оптическая плотность или Strength.", 0, 100, 0);
+        defineDouble(set, "amount_drift_time", "Amount Drift Time (frames)",
+            "Число кадров между опорными значениями меняющегося количества. 48 при 25 fps — около 1,9 с. Больше — медленнее. Не меняет время жизни/геометрию уже активных следов; это задаёт Persistence.", 1, 10000, 48);
         require(parameters->paramDefine(set, kOfxParamTypeInteger, "persistence", &choice), "define defect persistence");
         require(properties->propSetString(choice, kOfxPropLabel, 0, "Persistence (frames)"), "defect persistence label");
         optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0, "Сколько кадров держится событие до смены рисунка. Одинаковое время и seed всегда возвращают тот же рисунок."), "defect persistence hint");
@@ -759,14 +955,20 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetInt(choice, kOfxParamPropMax, 0, 2147483647), "defect seed maximum");
         require(properties->propSetInt(choice, kOfxParamPropDisplayMin, 0, 0), "defect seed display minimum");
         require(properties->propSetInt(choice, kOfxParamPropDisplayMax, 0, 2147483647), "defect seed display maximum");
+        defineAdvancedColor(set);
         require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &choice), "define defect transfer");
+        require(properties->propSetString(choice, kOfxParamPropParent, 0, "advanced_color"), "defect encoding group");
         require(properties->propSetString(choice, kOfxPropLabel, 0, "Encoding"), "defect transfer label");
         for (int i = 0; i < 3; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i,
             i == 0 ? "Linear Rec.709" : i == 1 ? "sRGB" : "Rec.709 Gamma 2.4"), "defect transfer option");
-        require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 1), "defect transfer default");
+        require(properties->propSetInt(choice, kOfxParamPropDefault, 0, static_cast<int>(silentfilm::color::pipelineTransfer)), "defect transfer default");
+        optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
+            "В обычной цепочке оставь sRGB. У Negative/Printing gamma не применяется: это физическое пропускание и поле отключено. У Capture/Positive/Projector ручной override нужен только при использовании ноды отдельно. Comfy color only восстанавливает sRGB, не меняя рисунок/силу."), "defect transfer contract hint");
         choice = page;
-        const char* children[] = {"material", "pattern", "strength", "size", "amount", "persistence", "seed", "encoding"};
-        for (int i = 0; i < 8; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
+        const char* children[] = {"blend", "mix_response", "material", "pattern", "strength", "size", "size_spread", "thickness_spread", "edge_bias",
+            "scratch_wander", "scratch_wander_time", "amount", "amount_variation", "amount_drift_time", "persistence", "seed", "encoding"};
+        for (int i = 0; i < 17; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
+        defineReferenceControls(set, page, kind);
         return kOfxStatOK;
     }
     if (kind != EffectKind::Probe) {
@@ -801,7 +1003,11 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
     require(effects->clipGetHandle(effect, "Output", &state->output, nullptr), "output clip");
     OfxParamSetHandle set = nullptr;
     require(effects->getParamSet(effect, &set), "instance parameter set");
-    if (kind == EffectKind::Probe) {
+    if (kind == EffectKind::CrankExposure) {
+        require(parameters->paramGetHandle(set, "exposure_map", &state->exposureMap, nullptr), "exposure map handle");
+        require(parameters->paramGetHandle(set, "blend", &state->exposureBlend, nullptr), "exposure blend handle");
+        require(parameters->paramGetHandle(set, "frame_offset", &state->exposureOffset, nullptr), "exposure offset handle");
+    } else if (kind == EffectKind::Probe) {
         require(parameters->paramGetHandle(set, gainName, &state->gain, nullptr), "gain parameter");
         require(parameters->paramGetHandle(set, mixName, &state->mix, nullptr), "mix parameter");
         require(parameters->paramGetHandle(set, offsetName, &state->offset, nullptr), "offset parameter");
@@ -838,7 +1044,16 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "material", &state->defectMaterial, nullptr), "defect material parameter");
         require(parameters->paramGetHandle(set, "pattern", &state->defectPattern, nullptr), "defect pattern parameter");
         require(parameters->paramGetHandle(set, "strength", &state->defectStrength, nullptr), "defect strength parameter");
+        require(parameters->paramGetHandle(set, "blend", &state->defectBlend, nullptr), "defect blend parameter");
+        require(parameters->paramGetHandle(set, "mix_response", &state->defectMixResponse, nullptr), "defect mix response parameter");
         require(parameters->paramGetHandle(set, "size", &state->defectSize, nullptr), "defect size parameter");
+        require(parameters->paramGetHandle(set, "size_spread", &state->defectSizeSpread, nullptr), "defect size spread parameter");
+        require(parameters->paramGetHandle(set, "thickness_spread", &state->defectThicknessSpread, nullptr), "defect thickness spread parameter");
+        require(parameters->paramGetHandle(set, "edge_bias", &state->defectEdgeBias, nullptr), "defect edge bias parameter");
+        require(parameters->paramGetHandle(set, "scratch_wander", &state->defectScratchWander, nullptr), "defect scratch wander parameter");
+        require(parameters->paramGetHandle(set, "scratch_wander_time", &state->defectScratchWanderTime, nullptr), "defect wander time parameter");
+        require(parameters->paramGetHandle(set, "amount_variation", &state->defectAmountVariation, nullptr), "defect amount variation parameter");
+        require(parameters->paramGetHandle(set, "amount_drift_time", &state->defectAmountDriftTime, nullptr), "defect amount drift time parameter");
         require(parameters->paramGetHandle(set, "amount", &state->defectAmount, nullptr), "defect amount parameter");
         require(parameters->paramGetHandle(set, "persistence", &state->defectPersistence, nullptr), "defect persistence parameter");
         require(parameters->paramGetHandle(set, "seed", &state->defectSeed, nullptr), "defect seed parameter");
@@ -857,6 +1072,7 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "encoding", &state->encoding, nullptr), "film encoding parameter");
         if (kind == EffectKind::Negative) require(parameters->paramGetHandle(set, "preview_positive", &state->positivePreview, nullptr), "film preview parameter");
     }
+    updateDefectColorUi(*state, 0);
     require(properties->propSetPointer(effectProperties(effect), kOfxPropInstanceData, 0, state.get()), "store instance");
     state.release();
     return kOfxStatOK;
@@ -868,6 +1084,24 @@ OfxStatus destroy(OfxImageEffectHandle effect)
     auto* state = &instance(effect);
     require(properties->propSetPointer(effectProperties(effect), kOfxPropInstanceData, 0, nullptr), "clear instance");
     delete state;
+    return kOfxStatOK;
+}
+
+/** Release reconstructible instance caches when requested by the host. */
+OfxStatus purgeCaches(OfxImageEffectHandle effect)
+{
+    auto& state = instance(effect);
+    state.crankSchedule.clear();
+    state.focusSignals.clear();
+    state.projectorSignals.clear();
+    state.exposureMaps.clear();
+#ifdef SILENTFILM_ENABLE_CUDA
+    const auto status = state.projectorCuda.clear();
+    if (status.code) {
+        std::fprintf(stderr, "[ALEXZSilentFilmOFX] purge CUDA code=%d: %s\n", status.code, status.message);
+        return kOfxStatFailed;
+    }
+#endif
     return kOfxStatOK;
 }
 
@@ -1026,8 +1260,18 @@ OfxStatus renderCameraOptics(OfxImageEffectHandle effect, Instance& state, doubl
     double range[2]{};
     sourceFrameRange(state.source, range);
     // OFX time в этом adapter измеряется в кадрах, как и Source frame range.
-    const auto frame = static_cast<std::int64_t>(std::floor(time - range[0] + 1e-9));
+    const double count = std::ceil(range[1] - range[0] + 1);
+    if (!std::isfinite(count) || count < 1 || count > 10000000)
+        throw Failure(kOfxStatErrValue, "Unsupported camera optics clip frame range");
+    const auto frame = static_cast<std::int64_t>(std::floor(std::clamp(time - range[0], 0.0, count - 1) + 1e-9));
     auto optics = cameraSettingsAt(state, time, frame);
+    if (count <= 1) optics.focusDrift = 0;
+    if (optics.focusDrift > 0) {
+        int seed = 1925;
+        require(parameters->paramGetValueAtTime(state.focusSeed, time, &seed), "read normalized focus seed");
+        optics.focusSignal = state.focusSignals.at(static_cast<std::size_t>(frame),
+            static_cast<std::size_t>(count), static_cast<std::uint32_t>(seed));
+    }
     Image source(state.source, time);
     optics.sourcePremultiplied = source.premultiplied();
     optics.outputPremultiplied = output.premultiplied();
@@ -1047,7 +1291,7 @@ OfxStatus renderCameraOptics(OfxImageEffectHandle effect, Instance& state, doubl
     (void)in;
     (void)cudaEnabled;
 #endif
-    if (!silentfilm::renderCameraCpu(source.view(), output.view(), region, optics, 1.0f, cameraAbort, effect)) {
+    if (!silentfilm::renderCameraOpticsCpu(source.view(), output.view(), region, optics, cameraAbort, effect)) {
         if (effects->abort(effect)) return kOfxStatOK;
         throw Failure(kOfxStatFailed, "Camera optics failed");
     }
@@ -1073,13 +1317,28 @@ OfxStatus framesNeeded(OfxImageEffectHandle effect, OfxPropertySetHandle in, Ofx
     return kOfxStatOK;
 }
 
-/** Let Resolve bypass an exactly neutral probe without fetching any images. */
+/** Let Resolve bypass neutral probe/defect effects without fetching images or executing a render. */
 OfxStatus identity(OfxImageEffectHandle effect, OfxPropertySetHandle in, OfxPropertySetHandle out)
 {
-    if (instance(effect).kind != EffectKind::Probe) return kOfxStatReplyDefault;
+    auto& state = instance(effect);
     const double time = actionTime(in);
-    const auto settings = settingsAt(instance(effect), time);
-    if (settings.gainEV != 0 || settings.mix != 0) return kOfxStatReplyDefault;
+    if (state.kind == EffectKind::CrankExposure) {
+        double blend = 1;
+        require(parameters->paramGetValueAtTime(state.exposureBlend, time, &blend), "identity exposure blend");
+        if (blend != 0) return kOfxStatReplyDefault;
+    } else if (state.kind == EffectKind::Defects) {
+        double strength = 0, amount = 0, blend = 1;
+        int pattern = 0;
+        require(parameters->paramGetValueAtTime(state.defectStrength, time, &strength), "identity defect strength");
+        require(parameters->paramGetValueAtTime(state.defectBlend, time, &blend), "identity defect blend");
+        require(parameters->paramGetValueAtTime(state.defectAmount, time, &amount), "identity defect amount");
+        require(parameters->paramGetValueAtTime(state.defectPattern, time, &pattern), "identity defect pattern");
+        if (blend != 0 && strength != 0 && (pattern == static_cast<int>(silentfilm::DefectPattern::Development) || amount != 0))
+            return kOfxStatReplyDefault;
+    } else if (state.kind == EffectKind::Probe) {
+        const auto settings = settingsAt(state, time);
+        if (settings.gainEV != 0 || settings.mix != 0) return kOfxStatReplyDefault;
+    } else return kOfxStatReplyDefault;
     require(properties->propSetString(out, kOfxPropName, 0, "Source"), "identity source");
     require(properties->propSetDouble(out, kOfxPropTime, 0, time), "identity time");
     return kOfxStatOK;
@@ -1134,12 +1393,23 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     }
     silentfilm::DefectParameters defects;
     if (isDefects) {
-        int material = 0, pattern = 0, persistence = 48, seed = 1925, transfer = 1;
-        double strength = 0.15, size = 0.12, amount = 3;
+        int material = 0, pattern = 0, persistence = 48, seed = 1925, transfer = 1, mixResponse = 0;
+        double strength = 0.15, size = 0.12, amount = 3, blend = 1;
+        double sizeSpread = 35, thicknessSpread = 35, edgeBias = 0, wander = 0, wanderTime = 8;
+        double amountVariation = 0, amountDriftTime = 48;
         require(parameters->paramGetValueAtTime(state.defectMaterial, time, &material), "read defect material");
         require(parameters->paramGetValueAtTime(state.defectPattern, time, &pattern), "read defect pattern");
         require(parameters->paramGetValueAtTime(state.defectStrength, time, &strength), "read defect strength");
+        require(parameters->paramGetValueAtTime(state.defectBlend, time, &blend), "read defect blend");
+        require(parameters->paramGetValueAtTime(state.defectMixResponse, time, &mixResponse), "read defect mix response");
         require(parameters->paramGetValueAtTime(state.defectSize, time, &size), "read defect size");
+        require(parameters->paramGetValueAtTime(state.defectSizeSpread, time, &sizeSpread), "read defect size spread");
+        require(parameters->paramGetValueAtTime(state.defectThicknessSpread, time, &thicknessSpread), "read defect thickness spread");
+        require(parameters->paramGetValueAtTime(state.defectEdgeBias, time, &edgeBias), "read defect edge bias");
+        require(parameters->paramGetValueAtTime(state.defectScratchWander, time, &wander), "read defect wander");
+        require(parameters->paramGetValueAtTime(state.defectScratchWanderTime, time, &wanderTime), "read defect wander time");
+        require(parameters->paramGetValueAtTime(state.defectAmountVariation, time, &amountVariation), "read defect amount variation");
+        require(parameters->paramGetValueAtTime(state.defectAmountDriftTime, time, &amountDriftTime), "read defect amount drift time");
         require(parameters->paramGetValueAtTime(state.defectAmount, time, &amount), "read defect amount");
         require(parameters->paramGetValueAtTime(state.defectPersistence, time, &persistence), "read defect persistence");
         require(parameters->paramGetValueAtTime(state.defectSeed, time, &seed), "read defect seed");
@@ -1148,18 +1418,37 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
             || !std::isfinite(strength) || strength < 0 || strength > 1 || !std::isfinite(size) || size < 0.01 || size > 50
             || !std::isfinite(amount) || amount < 0 || amount > 24 || transfer < 0 || transfer > 2)
             throw Failure(kOfxStatErrValue, "Invalid defect parameter value");
+        if (!std::isfinite(blend) || blend < 0 || blend > 1 || mixResponse < 0 || mixResponse > 1)
+            throw Failure(kOfxStatErrValue, "Invalid defect blend value");
+        const auto inRange = [](double value, double low, double high) {
+            return std::isfinite(value) && value >= low && value <= high;
+        };
+        if (!inRange(sizeSpread, 0, 100) || !inRange(thicknessSpread, 0, 100) || !inRange(edgeBias, 0, 1)
+            || !inRange(wander, 0, 64) || !inRange(wanderTime, 1, 240)
+            || !inRange(amountVariation, 0, 100) || !inRange(amountDriftTime, 1, 10000))
+            throw Failure(kOfxStatErrValue, "Invalid defect shape or timing value");
         defects.material = static_cast<silentfilm::DefectMaterial>(material);
         defects.pattern = static_cast<silentfilm::DefectPattern>(pattern);
-        defects.transfer = static_cast<silentfilm::Transfer>(transfer);
+        defects.transfer = silentfilm::color::defectTransfer(defects.material, static_cast<silentfilm::Transfer>(transfer));
         defects.strength = static_cast<float>(strength); defects.size = static_cast<float>(size);
+        defects.blend = static_cast<float>(blend);
+        defects.mixResponse = static_cast<silentfilm::DefectMixResponse>(mixResponse);
         defects.amount = static_cast<float>(amount); defects.persistence = persistence;
-        defects.seed = static_cast<std::uint32_t>(seed); defects.time = time;
+        defects.sizeSpreadPercent = static_cast<float>(sizeSpread);
+        defects.thicknessSpreadPercent = static_cast<float>(thicknessSpread);
+        defects.edgeBias = static_cast<float>(edgeBias);
+        defects.scratchWander = static_cast<float>(wander);
+        defects.scratchWanderTime = static_cast<int>(std::floor(wanderTime + 0.5));
+        defects.amountVariationPercent = static_cast<float>(amountVariation);
+        defects.amountDriftTime = static_cast<int>(std::floor(amountDriftTime + 0.5));
+        defects.seed = static_cast<std::uint32_t>(seed);
         defects.frameRate = clipFrameRate(state.output);
+        double range[2]{};
+        sourceFrameRange(state.source, range);
+        defects.time = std::max(0.0, time - range[0]) / defects.frameRate;
     }
     int cudaEnabled = 0;
     optionalProperty(properties->propGetInt(in, kOfxImageEffectPropCudaEnabled, 0, &cudaEnabled), "CUDA render mode");
-    if (isEmulsion && cudaEnabled) throw Failure(kOfxStatErrUnsupported, "SilentFilm emulsion optics use CPU spatial processing");
-    if (isDefects && cudaEnabled) throw Failure(kOfxStatErrUnsupported, "SilentFilm Defects uses CPU spatial processing");
 #ifndef SILENTFILM_ENABLE_CUDA
     if (cudaEnabled) throw Failure(kOfxStatErrUnsupported, "This plugin was built without CUDA support");
 #endif
@@ -1197,6 +1486,41 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     }
     int window[4] = {};
     require(properties->propGetIntN(in, kOfxImageEffectPropRenderWindow, 4, window), "render window");
+    if (state.kind == EffectKind::CrankExposure) {
+        double blend = 1;
+        int offset = 0;
+        char* path = nullptr;
+        require(parameters->paramGetValueAtTime(state.exposureBlend, time, &blend), "read exposure blend");
+        require(parameters->paramGetValue(state.exposureOffset, &offset), "read exposure frame offset");
+        if (!std::isfinite(blend) || blend < 0 || blend > 1) throw Failure(kOfxStatErrValue, "Invalid Crank Exposure Blend");
+        float gain = 1;
+        if (blend > 0) {
+            require(parameters->paramGetValue(state.exposureMap, &path), "read exposure map path");
+            try {
+                const auto map = state.exposureMaps.load(path ? path : "");
+                double range[2]{};
+                sourceFrameRange(state.source, range);
+                gain = map->at(time - range[0], offset, clipFrameRate(state.source));
+            } catch (const Failure&) { throw; }
+            catch (const std::runtime_error& error) { throw Failure(kOfxStatErrValue, error.what()); }
+        }
+        const silentfilm::RenderWindow region{window[0], window[1], window[2], window[3]};
+#ifdef SILENTFILM_ENABLE_CUDA
+        if (cudaEnabled) {
+            void* stream = nullptr;
+            const auto streamStatus = properties->propGetPointer(in, kOfxImageEffectPropCudaStream, 0, &stream);
+            optionalProperty(streamStatus, "exposure CUDA stream");
+            const auto status = silentfilm::renderCudaCrankExposure(current.view(), output.view(), region, gain,
+                static_cast<float>(blend), current.premultiplied(), output.premultiplied(), stream, streamStatus == kOfxStatOK);
+            if (status.code) throw Failure(kOfxStatFailed, status.message ? status.message : "CUDA Crank Exposure failed");
+            return kOfxStatOK;
+        }
+#endif
+        if (!silentfilm::renderCrankExposureCpu(current.view(), output.view(), region, gain, static_cast<float>(blend),
+            current.premultiplied(), output.premultiplied(), cameraAbort, effect) && !effects->abort(effect))
+            throw Failure(kOfxStatFailed, "Crank Exposure cancelled");
+        return kOfxStatOK;
+    }
     if (isProjector) {
         const silentfilm::RenderWindow region{window[0], window[1], window[2], window[3]};
         projector.sourcePremultiplied = current.premultiplied();
@@ -1229,13 +1553,37 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     }
     if (isDefects) {
         const silentfilm::RenderWindow region{window[0], window[1], window[2], window[3]};
-        silentfilm::renderDefectsCpu(current.view(), output.view(), region, defects, cameraAbort, effect);
+#ifdef SILENTFILM_ENABLE_CUDA
+        if (cudaEnabled) {
+            void* stream = nullptr;
+            const auto streamStatus = properties->propGetPointer(in, kOfxImageEffectPropCudaStream, 0, &stream);
+            optionalProperty(streamStatus, "defects CUDA stream");
+            const auto status = silentfilm::renderCudaDefects(current.view(), output.view(), region, defects,
+                stream, streamStatus == kOfxStatOK);
+            if (status.code) throw Failure(kOfxStatFailed, status.message ? status.message : "CUDA Defects failed");
+            return kOfxStatOK;
+        }
+#endif
+        if (!silentfilm::renderDefectsCpu(current.view(), output.view(), region, defects, cameraAbort, effect)
+            && !effects->abort(effect)) throw Failure(kOfxStatFailed, "Defects processing failed");
         return kOfxStatOK;
     }
     if (isEmulsion) {
         const silentfilm::RenderWindow region{window[0], window[1], window[2], window[3]};
-        silentfilm::renderEmulsionCpu(current.view(), output.view(), region, emulsion,
-            emulsion.halationStrength, emulsion.halationSize, cameraAbort, effect);
+#ifdef SILENTFILM_ENABLE_CUDA
+        if (cudaEnabled) {
+            void* stream = nullptr;
+            const auto streamStatus = properties->propGetPointer(in, kOfxImageEffectPropCudaStream, 0, &stream);
+            optionalProperty(streamStatus, "emulsion CUDA stream");
+            const auto status = silentfilm::renderCudaFilm(current.view(), output.view(), region, emulsion,
+                state.projectorCuda, stream, streamStatus == kOfxStatOK);
+            if (status.code) throw Failure(kOfxStatFailed, status.message ? status.message : "CUDA emulsion failed");
+            return kOfxStatOK;
+        }
+#endif
+        if (!silentfilm::renderEmulsionCpu(current.view(), output.view(), region, emulsion,
+            emulsion.halationStrength, emulsion.halationSize, cameraAbort, effect) && !effects->abort(effect))
+            throw Failure(kOfxStatFailed, "Emulsion processing failed");
         return kOfxStatOK;
     }
     const float gain = silentfilm::gainFromEV(settings.gainEV);
@@ -1289,6 +1637,8 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
         if (std::strcmp(action, kOfxImageEffectActionDescribeInContext) == 0) return describeContext(effect, kind);
         if (std::strcmp(action, kOfxActionCreateInstance) == 0) return create(effect, kind);
         if (std::strcmp(action, kOfxActionDestroyInstance) == 0) return destroy(effect);
+        if (std::strcmp(action, kOfxActionPurgeCaches) == 0) return purgeCaches(effect);
+        if (std::strcmp(action, kOfxActionInstanceChanged) == 0) return changed(effect, in);
         if (std::strcmp(action, kOfxImageEffectActionGetFramesNeeded) == 0) return framesNeeded(effect, in, out);
         if (std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) return identity(effect, in, out);
         if (std::strcmp(action, kOfxImageEffectActionRender) == 0) return render(effect, in);
@@ -1311,13 +1661,14 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 26, setHost, entry<EffectKind::CrankExposure>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 6, setHost, entry<EffectKind::Probe>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 9, setHost, entry<EffectKind::Camera>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 6, setHost, entry<EffectKind::Negative>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 6, setHost, entry<EffectKind::Print>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 10, setHost, entry<EffectKind::Projector>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 6, setHost, entry<EffectKind::Defects>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 15, setHost, entry<EffectKind::CameraOptics>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 25, setHost, entry<EffectKind::Camera>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 25, setHost, entry<EffectKind::Negative>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 25, setHost, entry<EffectKind::Print>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 25, setHost, entry<EffectKind::Projector>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 25, setHost, entry<EffectKind::Defects>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 25, setHost, entry<EffectKind::CameraOptics>},
 };
 
 constexpr int pluginCount = static_cast<int>(sizeof(plugins) / sizeof(plugins[0]));

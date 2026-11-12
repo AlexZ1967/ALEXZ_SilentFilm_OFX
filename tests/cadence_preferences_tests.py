@@ -26,9 +26,19 @@ class PresetStorage(unittest.TestCase):
              "variation": (0.7, 0, 1, False), "source_fps": (25, 1, 120, False),
              "samples": (9, 1, 17, True), "seed": (1925, 0, 2147483647, True)},
             {"source_fps_mode": ("timeline", ("timeline", "source", "custom")),
+             "exposure_mode": ("bake", ("bake", "ofx")),
              "blur_mode": ("flow_integrated", ("flow_integrated", "simple"))},
             {"auto_import": True, "use_raw_source": True}, self.path,
             texts={"output_folder": "/tmp/SilentFilm"})
+
+    def test_exposure_mode_survives_preset_and_factory_reset(self):
+        store = self.store()
+        self.assertEqual(store.current["exposure_mode"], "bake")
+        store.save_preset("Via OFX", dict(store.current, exposure_mode="ofx"))
+        self.assertEqual(self.store().current["exposure_mode"], "ofx")
+        store.reset()
+        self.assertEqual(store.current["exposure_mode"], "bake")
+        self.assertEqual(store.preset("Via OFX")["exposure_mode"], "ofx")
 
     def test_output_folder_survives_restart_and_preset_selection(self):
         store = self.store()

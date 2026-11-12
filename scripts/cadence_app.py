@@ -55,7 +55,7 @@ def child_environment():
     return environment
 
 
-def require_flow_support(helper, mode, raw=False):
+def require_flow_support(helper, mode, raw=False, exposure_mode="bake"):
     """Validate helper parameter support and flow before exporting processed source frames."""
     try:
         result = subprocess.run([str(helper), "--capabilities"], capture_output=True, text=True,
@@ -63,6 +63,8 @@ def require_flow_support(helper, mode, raw=False):
         if result.returncode != 0:
             raise ValueError("Unsupported capabilities request")
         capabilities = json.loads(result.stdout)
+        if capabilities.get("exposure_ofx") is not True:
+            raise ValueError("Native helper не поддерживает выбор Bake/OFX")
         if capabilities.get("camera_parameter_schema", 0) < 2 or capabilities.get("max_blur_samples", 0) < 17:
             raise ValueError("Outdated camera parameter support")
         supported = capabilities["optical_flow"] is True
@@ -71,7 +73,7 @@ def require_flow_support(helper, mode, raw=False):
         if not raw and capabilities.get("resolve_frame_provider") is not True:
             raise ValueError("Outdated direct Resolve frame provider support")
     except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError("Нужна актуальная сборка native helper Cadence с поддержкой временной сетки таймлайна, выбора source_fps и 17 отсчётов. Пересобери проект.") from error
+        raise RuntimeError("Нужна актуальная сборка native helper Cadence с поддержкой Bake/OFX, временной сетки таймлайна, source_fps и 17 отсчётов. Пересобери проект. " + str(error)) from error
     if mode == "flow_integrated" and not supported:
         raise RuntimeError("Эта сборка Cadence не поддерживает оптический поток. Установи libopencv-dev, повтори конфигурацию CMake и сборку. Затем переоткрой окно Cadence.")
 
@@ -132,7 +134,7 @@ class Application:
         ("samples", "blur_samples", 9, 1, 17, True,
          "9 — как в Comfy; 5 — для более быстрого расчёта. При 3 треугольные веса почти полностью оставляют центральный отсчёт: это не полноценный смаз, дефекты flow могут стать заметнее. При 1 также берётся центр; flow дробного центра сохраняется."),
         ("exposure_link", "exposure_variation", 1, 0, 1, False,
-         "0 — постоянная экспозиция; 1 — полный закон выдержки. Мерцание сразу запекается в кадры результата. При постоянной скорости ручки (равные min/max или fps_drift_strength=0) пульсации нет."),
+         "0 — постоянная экспозиция; 1 — полный закон выдержки. Bake Exposure запекает её, Exposure via OFX сохраняет точную карту для отдельной ноды с Blend. При постоянной скорости ручки пульсации нет."),
         ("shake", "camera_shake_strength", 0.25, 0, 1, False,
          "Движение камеры внутри выдержки, связанное с оборотом ручки. Начни с 0,25; 0 выключает."),
     ]
@@ -174,6 +176,7 @@ class Application:
                                    for key, label, default, low, high, integer, hint in self.FIELDS
                                    if key in self.PRESET_NUMBERS}
         self.preference_choices = {
+            "exposure_mode": ("bake", ("bake", "ofx")),
             "blur_mode": ("flow_integrated", ("flow_integrated", "simple")),
             "compute_device": (args.backend, ("cuda", "cpu")),
             "format": ("prores", ("prores", "tiff")),
@@ -279,7 +282,7 @@ class Application:
         outer.append(self.batch_label)
         self.batch_progress = Gtk.ProgressBar(show_text=True)
         outer.append(self.batch_progress)
-        outer.append(self.label("Одна экспозиция → один кадр показа. Связанные с ручкой выдержка и экспозиция запекаются в Cadence."))
+        outer.append(self.label("Одна экспозиция → один кадр показа. Экспозицию ручки можно запечь или применять позже в SilentFilm Crank Exposure."))
         self.ignore_processing = Gtk.CheckButton(label="Use Raw Source (In/Out Only)", active=True)
         self.ignore_processing.set_tooltip_text("Не учитывать обработки клипа. Кадры исходника приводятся к монтажному диапазону и FPS таймлайна; длительность входа одинакова в обоих режимах. Частоту интерпретации задаёт source_fps_mode. Гамму входа выбери по исходнику. По умолчанию включено; сохраняется в настройках и пресетах.")
         self.ignore_processing.connect("toggled", lambda widget: self.guarded(self.update_source_mode))
@@ -332,9 +335,13 @@ class Application:
         form.append(heading)
         options = Gtk.Grid(column_spacing=12, row_spacing=6)
         form.append(options)
+        self.exposure_mode = Gtk.DropDown.new_from_strings(["Bake Exposure", "Exposure via OFX"])
+        self.exposure_mode.set_tooltip_text("Bake — экспозиция в готовом видео. OFX — отдельная карта и попытка автоматически настроить SilentFilm Crank Exposure в Fusion: путь карты, Blend1, Frame Offset0. Blend меняется без пересчёта Cadence на странице Fusion. Если API откажет, появится инструкция ручной настройки. Выбор сохраняется в пресетах.")
+        options.attach(self.label("Crank Exposure", False), 0, 2, 1, 1)
+        options.attach(self.exposure_mode, 1, 2, 2, 1)
         self.backend = Gtk.DropDown.new_from_strings(["cuda", "cpu"])
         self.backend.set_selected(0 if self.args.backend == "cuda" else 1)
-        self.backend.set_tooltip_text("cpu — нативная обработка на CPU; cuda — интеграция выдержки, shake и экспозиция на GPU. Farneback и flow-деформации в текущей версии остаются на CPU OpenCV. Автоматический fallback при OOM не реализован.")
+        self.backend.set_tooltip_text("cpu — нативная обработка на CPU; cuda — интеграция выдержки, shake и запекаемая экспозиция на GPU. Farneback оценивается на CPU OpenCV, flow-деформации и смешивание выполняются на CUDA. Exposure via OFX переносит применение экспозиции в отдельную ноду. Автоматический fallback при OOM не реализован.")
         self.format = Gtk.DropDown.new_from_strings(["ProRes 4444", "TIFF RGBA16"])
         self.transfer = Gtk.DropDown.new_from_strings(["Auto (Resolve)", "sRGB", "Rec.709 Gamma 2.4", "Linear Rec.709"])
         self.transfer.set_selected(0)
@@ -428,11 +435,16 @@ class Application:
         self.job = self.entry(editable=False)
         paths.attach(self.label("Job", False), 0, 0, 1, 1)
         paths.attach(self.job, 1, 0, 2, 1)
-        outer.append(self.label("После импорта при необходимости добавь Camera Optics → Negative → Print → Projector."))
+        self.exposure_map_path = self.entry(editable=False)
+        self.exposure_map_path.set_placeholder_text("Exposure Map — появится после расчёта")
+        self.exposure_map_path.set_tooltip_text("Путь можно скопировать и выбрать в Exposure Map ноды SilentFilm Crank Exposure. Для Bake дополнительная нода не нужна.")
+        outer.append(self.exposure_map_path)
+        outer.append(self.label("Exposure via OFX: карта назначается автоматически в Fusion → SilentFilm Crank Exposure. Затем Camera Optics → Negative → Print → Projector. При отказе API появится инструкция ручной настройки."))
 
     def preference_widgets(self):
         """Map stable choices to controls while excluding clip paths and ranges."""
         return {"blur_mode": self.interpolation, "compute_device": self.backend,
+                "exposure_mode": self.exposure_mode,
                 "format": self.format, "input_transfer": self.transfer, "placement": self.placement,
                 "source_fps_mode": self.source_fps_mode,
                 "auto_import": self.auto_import, "preserve_alpha": self.preserve_alpha,
@@ -845,6 +857,7 @@ class Application:
             raise ValueError("Для исходника без обработок укажи фактическую гамму входного файла")
         request.update(capture_range(snapshot, bool(snapshot and snapshot.get("target") and self.ignore_processing.get_active())))
         request.update(schema=1, processing="capture_rgb", input=str(path.resolve()),
+                       exposure_mode=("bake", "ofx")[self.exposure_mode.get_selected()],
                        blur_mode=("flow_integrated", "simple")[self.interpolation.get_selected()],
                        device=("cuda", "cpu")[self.backend.get_selected()], format="prores" if self.format.get_selected() == 0 else "tiff",
                        input_transfer=("srgb", "srgb", "gamma24", "linear")[choice])
@@ -882,10 +895,11 @@ class Application:
             raise RuntimeError("Открыто сохранённое задание. Для готового результата нажми «Import». "
                                "Для нового расчёта выдели клип таймлайна и заново открой окно из меню Resolve.")
         request = self.numeric_request()
+        self.exposure_map_path.set_text("")
         fps_mode = ("timeline", "source", "custom")[self.source_fps_mode.get_selected()]
         if not Path(self.args.helper).is_file():
             raise RuntimeError("Сначала собери native helper: " + self.args.helper)
-        require_flow_support(self.args.helper, request["blur_mode"], raw=self.ignore_processing.get_active())
+        require_flow_support(self.args.helper, request["blur_mode"], raw=self.ignore_processing.get_active(), exposure_mode=request["exposure_mode"])
         snapshot = self.source_snapshot
         if self.job_target and not snapshot:
             raise RuntimeError("Для нового расчёта заново выбери клип таймлайна. Готовое задание можно импортировать без пересчёта.")
@@ -1055,6 +1069,10 @@ class Application:
             self.context_change(self.placement, "set_selected", 1 if context.get("import_mode", "above") == "above" else 0)
             self.job.set_text(path)
             self.opened_job = Path(path)
+            result_file = self.opened_job / "result.ini"
+            if result_file.exists():
+                saved = read_ini(result_file)
+                self.context_change(self.exposure_mode, "set_selected", 1 if saved.get("exposure_mode") == "ofx" else 0)
             self.auto_pending = False
             self.process = None
             self.source_snapshot = None
@@ -1083,7 +1101,7 @@ class Application:
         result = read_ini(directory / "result.ini")
         if result.get("state") != "complete":
             raise RuntimeError("Задание ещё не завершено")
-        if self.imported_job == str(directory):
+        if self.imported_job == str(directory) and result.get("exposure_mode") != "ofx":
             self.status.set_text("Это задание уже импортировано.")
             return
         if not self.job_target:
@@ -1092,6 +1110,8 @@ class Application:
             mode = None
         def imported(result):
             self.imported_job = str(directory)
+            if result.get("exposure_map_path"):
+                self.exposure_map_path.set_text(result["exposure_map_path"])
             self.status.set_text(result["message"])
             if self.batch_active() and self.batch.current["state"] == "importing":
                 self.finish_batch_item("imported", result["message"])
@@ -1128,9 +1148,13 @@ class Application:
         status = read_ini(status_file) if status_file.exists() else {}
         if status.get("state") == "complete" and (directory / "result.ini").exists():
             result = read_ini(directory / "result.ini")
+            map_path = result.get("exposure_map_path", "") if result.get("exposure_mode") == "ofx" else ""
+            if self.exposure_map_path.get_text() != map_path:
+                self.exposure_map_path.set_text(map_path)
             self.progress.set_fraction(1.0)
             if self.running_job:
-                self.status.set_text(f'Готово: {result["frame_count"]} кадров, {float(result["output_duration"]):.3f} с. Экспозиция запечена в результат.')
+                exposure = "Карта сохранена для Crank Exposure OFX." if result.get("exposure_mode") == "ofx" else "Экспозиция запечена в результат."
+                self.status.set_text(f'Готово: {result["frame_count"]} кадров, {float(result["output_duration"]):.3f} с. {exposure}')
                 self.running_job = None
             if self.batch_active():
                 if not self.future and self.batch.current["state"] == "running":
@@ -1198,6 +1222,7 @@ class Application:
         for key, widget in self.values.items():
             widget.set_editable(not busy and not self.resume_job)
         self.backend.set_sensitive(not busy and not self.resume_job)
+        self.exposure_mode.set_sensitive(not busy and not self.resume_job and not self.opened_job)
         self.source_fps_mode.set_sensitive(not busy and not self.resume_job)
         self.interpolation.set_sensitive(not busy and not self.resume_job)
         self.format.set_sensitive(not busy and not self.resume_job)

@@ -1,6 +1,7 @@
 #include "silentfilm/film_optics.hpp"
 
 #include <cmath>
+#include <array>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -39,6 +40,10 @@ void signals()
     const auto a = cache.at(7, count, 1925, 1, 0.025f, 0.01f);
     const auto b = cache.at(7, count, 1926, 1, 0.025f, 0.01f);
     require(a.shiftX != b.shiftX && a.lampGain != b.lampGain, "Projector seed does not change the independent signals");
+    cache.clear(); cache.clear();
+    const auto rebuilt = cache.at(7, count, 1925, 1, 0.025f, 0.01f);
+    require(rebuilt.shiftX == a.shiftX && rebuilt.shiftY == a.shiftY && rebuilt.lampGain == a.lampGain,
+        "Purging projector signals changed the reconstructed frame");
 }
 
 void pixels()
@@ -69,8 +74,29 @@ void pixels()
 
 } // namespace
 
+/** Check the Comfy population normalization and independent lamp/transport strengths. */
+void workflowSignals()
+{
+    silentfilm::ProjectorSignalCache cache;
+    constexpr std::size_t count = 257;
+    std::array<double, 4> sums{}, squares{};
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto weave = cache.at(i, count, 1925, 2, 0, 0);
+        const auto flicker = cache.at(i, count, 1925, 0, 0.035f, 0);
+        const auto breathing = cache.at(i, count, 1925, 0, 0, 0.015f);
+        const std::array<double, 4> values{weave.shiftX / 2, weave.shiftY / 1.6,
+            (flicker.lampGain - 1) / 0.035, (breathing.lampGain - 1) / 0.015};
+        for (std::size_t lane = 0; lane < values.size(); ++lane) {
+            sums[lane] += values[lane]; squares[lane] += values[lane] * values[lane];
+        }
+    }
+    for (std::size_t lane = 0; lane < sums.size(); ++lane)
+        require(std::abs(sums[lane] / count) < 1e-5 && std::abs(squares[lane] / count - 1) < 1e-5,
+            "Workflow projector strengths are not normalized per clip like Comfy");
+}
+
 int main()
 {
-    try { signals(); pixels(); std::cout << "Projector core: PASS\n"; return 0; }
+    try { signals(); pixels(); workflowSignals(); std::cout << "Projector core: PASS\n"; return 0; }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

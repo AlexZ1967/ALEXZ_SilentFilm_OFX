@@ -20,6 +20,8 @@ _BRIDGE_DIRECTORY = str(Path(__file__).resolve().parent)
 if _BRIDGE_DIRECTORY not in sys.path:
     sys.path.insert(0, _BRIDGE_DIRECTORY)
 
+from cadence_exposure import FusionExposureError, configure_fusion_exposure
+
 
 def check(value, message):
     """Raise a readable error when a host operation fails."""
@@ -957,11 +959,112 @@ def import_prepared_media(pool, result, count, directory):
                        "Результат сохранён, повторный расчёт не нужен. Диагностика: import_diagnostics.json")
 
 
-def import_result(project, request):
+def save_exposure_diagnostics(path, diagnostics):
+    """Do not turn an already configured clip into a failure when writing an optional log fails."""
+    try:
+        atomic_json(Path(path).parent / "exposure_binding.json", diagnostics)
+    except Exception as error:
+        print("[SilentFilm Cadence] Не записана диагностика привязки экспозиции: " + str(error), file=sys.stderr)
+
+
+def attach_crank_exposure(project, result, outcome, resolve=None):
+    """Prefer a verified Fusion binding; preserve a disabled direct OFX as a compatibility fallback."""
+    if result.get("exposure_mode", "bake") != "ofx":
+        return outcome
+    path = str(Path(result["exposure_map_path"]).resolve())
+    outcome.update(exposure_map_path=path, exposure_status="manual_add", exposure_effect_enabled=False)
+    effect = None
+    item = None
+    existing = []
+    diagnostics = {"map": path, "item_id": outcome.get("item_id")}
+    try:
+        timeline = project.GetCurrentTimeline()
+        if not timeline or timeline.GetUniqueId() != outcome["timeline_id"]:
+            timeline = next((project.GetTimelineByIndex(i) for i in range(1, int(project.GetTimelineCount()) + 1)
+                             if project.GetTimelineByIndex(i).GetUniqueId() == outcome["timeline_id"]), None)
+        check(timeline, "Импортированный таймлайн не найден")
+        for track in range(1, int(timeline.GetTrackCount("video")) + 1):
+            for candidate in sequence(timeline.GetItemListInTrack("video", track)):
+                if candidate.GetUniqueId() == outcome.get("item_id"):
+                    item = candidate
+                    break
+            if item:
+                break
+        check(item, "Resolve не вернул добавленный монтажный клип для OFX")
+        if outcome.get("exposure_ofx_id"):
+            for previous in sequence(item.GetEffects("ofx")):
+                info = previous.GetInfo()
+                if isinstance(info, dict) and info.get("id") == outcome["exposure_ofx_id"]:
+                    existing.append(previous)
+            if len(existing) > 1:
+                outcome.update(exposure_status="manual_existing", exposure_effect_enabled=None)
+                outcome["message"] += " На клипе несколько Crank Exposure. Проверь их вручную; автоматическая настройка и добавление остановлены. Карта: " + path
+                return outcome
+            if existing and existing[0].GetIsEnabled() not in (False, 0):
+                outcome.update(exposure_status="manual_existing", exposure_effect_enabled=True)
+                outcome["message"] += " Прежний Crank Exposure уже включён; настрой его вручную. Второй эффект не добавлен. Карта: " + path
+                return outcome
+        try:
+            configured = configure_fusion_exposure(item, resolve, path, diagnostics)
+        except FusionExposureError as error:
+            if error.requires_recovery:
+                outcome.update(exposure_status="manual_recovery", exposure_effect_enabled=None)
+                outcome["message"] += " Автонастройка Fusion не завершена; проверь граф результата. " + str(error) + " Карта: " + path
+                save_exposure_diagnostics(path, diagnostics)
+                return outcome
+            diagnostics["fusion_error"] = str(error)
+        else:
+            if existing:
+                try:
+                    removed = bool(item.DeleteEffects(existing))
+                except Exception:
+                    removed = False
+                if not removed:
+                    diagnostics["legacy_warning"] = "Прежний выключенный OFX остался на клипе; не включай его повторно"
+            outcome.update(configured)
+            outcome["message"] += " SilentFilm Crank Exposure настроен в Fusion: карта назначена, Blend=1. Открой Fusion для регулировки Blend."
+            if diagnostics.get("legacy_warning"):
+                outcome["message"] += " " + diagnostics["legacy_warning"]
+            outcome["exposure_ofx_id"] = "com.alexz.silentfilm.crankexposure"
+            diagnostics["status"] = outcome["exposure_status"]
+            save_exposure_diagnostics(path, diagnostics)
+            return outcome
+        identifier = "com.alexz.silentfilm.crankexposure"
+        if resolve is not None:
+            catalog = sequence(resolve.GetEffectsList("video"))
+            matches = [entry for entry in catalog if isinstance(entry, dict)
+                       and entry.get("category") == "ofx" and (entry.get("id") == identifier
+                       or entry.get("name") == "SilentFilm Crank Exposure")]
+            check(len(matches) == 1, "SilentFilm Crank Exposure отсутствует или неоднозначен в GetEffectsList; обнови OFX bundle")
+            identifier = matches[0]["id"]
+        effect = existing[0] if existing else item.AddEffect("ofx", identifier)
+        check(effect, "Resolve не принял AddEffect для SilentFilm Crank Exposure")
+        check(effect.SetIsEnabled(False), "Resolve не выключил OFX до назначения карты")
+        outcome.update(exposure_status="manual_map_required", exposure_ofx_id=identifier)
+        note = "SilentFilm Crank Exposure добавлен и выключен. Выбери Exposure Map, затем включи эффект и настрой Blend."
+        if diagnostics.get("fusion_error"):
+            note = "Автопривязка Fusion недоступна: " + diagnostics["fusion_error"] + ". " + note
+    except Exception as error:
+        if effect and item and not existing:
+            try:
+                item.DeleteEffects([effect])
+            except Exception:
+                pass
+        note = f"Автодобавление Crank Exposure не завершено ({error}). Добавь ноду вручную перед Camera Optics/Negative и выбери Exposure Map."
+    outcome["message"] += " " + note + " Карта: " + path
+    diagnostics["status"] = outcome["exposure_status"]
+    save_exposure_diagnostics(path, diagnostics)
+    return outcome
+
+
+def import_result(project, request, resolve=None):
     """Import a complete capture into a verified new timeline or replace its saved target without ripple."""
     directory = Path(request["job"]).resolve()
     result = read_ini(directory / "result.ini")
     check(result.get("schema") == "1" and result.get("state") == "complete", "Задание ещё не завершено")
+    check(result.get("exposure_mode", "bake") in ("bake", "ofx"), "Неизвестный режим экспозиции результата")
+    if result.get("exposure_mode") == "ofx":
+        check(Path(result.get("exposure_map_path", "")).is_file(), "Карта экспозиции отсутствует; импорт OFX-результата остановлен")
     context_file = directory / "app_context.json"
     context = json.loads(context_file.read_text(encoding="utf-8")) if context_file.exists() else {}
     current = project_context(project)
@@ -974,7 +1077,12 @@ def import_result(project, request):
             for index in range(1, int(project.GetTimelineCount()) + 1):
                 timeline = project.GetTimelineByIndex(index)
                 if timeline.GetUniqueId() == previous.get("timeline_id"):
-                    return {"message": "Уже импортировано: " + timeline.GetName(), "timeline": timeline.GetName()}
+                    if result.get("exposure_mode") == "ofx" and previous.get("exposure_status") != "configured_fusion":
+                        previous["message"] = "Результат уже в монтаже: " + timeline.GetName() + "."
+                        previous = attach_crank_exposure(project, result, previous, resolve)
+                        atomic_json(marker, previous)
+                        return previous
+                    return dict(previous, message="Уже импортировано: " + timeline.GetName() + ". " + previous.get("message", ""))
     count = int(result["frame_count"])
     fps = float(result["output_fps"])
     check(count > 0 and math.isfinite(fps) and fps > 0, "Некорректная длина результата")
@@ -1015,6 +1123,7 @@ def import_result(project, request):
     if mode in ("replace", "above"):
         operation = replace_result if mode == "replace" else add_above_result
         outcome = operation(project, pool, clip, context["target"], count, fps, directory)
+        outcome = attach_crank_exposure(project, result, outcome, resolve)
         temporary = marker.with_suffix(".tmp")
         temporary.write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
         temporary.replace(marker)
@@ -1043,8 +1152,9 @@ def import_result(project, request):
             project.SetCurrentTimeline(old_timeline)
         pool.DeleteTimelines([timeline])
         raise
-    outcome = {"project_id": current["project_id"], "timeline_id": timeline.GetUniqueId(), "timeline": name,
+    outcome = {"project_id": current["project_id"], "timeline_id": timeline.GetUniqueId(), "timeline": name, "item_id": added[0].GetUniqueId(),
                "message": f"Импортировано {count} кадров, {count / fps:.3f} с при {fps:g} fps. Далее добавь Camera Optics → Negative → Print → Projector."}
+    outcome = attach_crank_exposure(project, result, outcome, resolve)
     temporary = marker.with_suffix(".tmp")
     temporary.write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
     temporary.replace(marker)
@@ -1154,7 +1264,7 @@ def main():
         elif action in ("bake_poll", "bake_cancel"):
             result = bake_poll(project, request, cancel=action == "bake_cancel")
         elif action == "import":
-            result = import_result(project, request)
+            result = import_result(project, request, resolve)
         elif action in ("cache_plan", "cache_clean"):
             result = clean_project_cache(project, request)
         else:

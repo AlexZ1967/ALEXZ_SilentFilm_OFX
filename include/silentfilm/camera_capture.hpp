@@ -41,6 +41,8 @@ class HandCrankSchedule {
     CaptureInterval intervalForIndex(std::size_t index) const;
 
 public:
+    /** Release cached intervals; the next request regenerates the deterministic schedule. */
+    void clear();
     /** Return one physical capture by index without duration normalization or playback resampling. */
     CaptureInterval captureAtIndex(std::int64_t index, const HandCrankSettings& settings);
     CaptureInterval intervalAt(double relativeTime, const HandCrankSettings& settings);
