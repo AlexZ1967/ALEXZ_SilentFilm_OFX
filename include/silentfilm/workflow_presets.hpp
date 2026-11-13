@@ -51,7 +51,8 @@ inline std::vector<ReferencePreset> referencePresets(ReferenceStage stage)
     const auto defect = [](const char* label, int node, int material, int pattern, double strength, double size,
                            double amount, int persistence, int seed) {
         return ReferencePreset{label, node, {{"material", static_cast<double>(material), true}, {"pattern", static_cast<double>(pattern), true},
-            {"strength", strength}, {"blend", 1}, {"mix_response", pattern == 3 ? 0.0 : 1.0, true},
+            {"strength", strength}, {"blend", 1}, {"mix_response", 1, true},
+            {"development_model", node == 15 ? 1.0 : node == 18 ? 2.0 : 0.0, true}, {"development_fog", 0.15},
             {"damage_type", pattern == 3 ? 0.0 : node == 16 || node == 28 || node == 39 ? 3.0
                 : node == 19 || node == 32 || node == 40 ? 2.0 : 1.0, true},
             {"irregularity", node == 14 ? 1.0 : node == 28 ? 0.5 : 0.6},

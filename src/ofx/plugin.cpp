@@ -138,6 +138,7 @@ struct Instance {
     OfxParamHandle defectBlend = nullptr;
     OfxParamHandle defectMixResponse = nullptr;
     OfxParamHandle defectDamage = nullptr, defectIrregularity = nullptr;
+    OfxParamHandle defectDevelopment = nullptr, defectDevelopmentFog = nullptr;
     OfxParamHandle defectAmount = nullptr, defectPersistence = nullptr, defectSeed = nullptr;
     OfxParamHandle defectSizeSpread = nullptr, defectThicknessSpread = nullptr, defectEdgeBias = nullptr;
     OfxParamHandle defectScratchWander = nullptr, defectScratchWanderTime = nullptr;
@@ -557,6 +558,7 @@ NumericDisplay numericDisplay(const char* id, double low, double high)
         {"scratch_wander", {0, 12, 0.1, 1}}, {"scratch_wander_time", {1, 48, 1, 1}},
         {"amount", {0, 12, 0.1, 1}}, {"amount_variation", {0, 100, 1, 1}},
         {"amount_drift_time", {1, 240, 1, 1}},
+        {"development_fog", {0, 0.3, 0.001, 3}},
     };
     for (const auto& entry : scales) {
         if (std::strcmp(id, entry.id) != 0) continue;
@@ -625,6 +627,9 @@ void updateDefectColorUi(Instance& state, double time)
     require(parameters->paramGetValueAtTime(state.defectAmountVariation, time, &variation), "defect amount variation UI value");
     const bool particles = pattern != static_cast<int>(silentfilm::DefectPattern::Development);
     const bool scratches = pattern == static_cast<int>(silentfilm::DefectPattern::Scratches);
+    int development = 0, damage = 0;
+    require(parameters->paramGetValueAtTime(state.defectDevelopment, time, &development), "defect development UI model");
+    require(parameters->paramGetValueAtTime(state.defectDamage, time, &damage), "defect damage UI model");
     OfxPropertySetHandle sizeProps = nullptr;
     require(parameters->paramGetPropertySet(state.defectSize, &sizeProps), "defect size UI properties");
     const bool stains = pattern == static_cast<int>(silentfilm::DefectPattern::Stains);
@@ -651,6 +656,10 @@ void updateDefectColorUi(Instance& state, double time)
     enabled(state.defectAmount, particles);
     enabled(state.defectAmountVariation, particles);
     enabled(state.defectAmountDriftTime, particles && variation > 0);
+    enabled(state.defectDevelopment, !particles);
+    enabled(state.defectDevelopmentFog, !particles && development != 0);
+    enabled(state.defectDamage, particles);
+    enabled(state.defectIrregularity, particles ? damage != 0 : development != 0);
 }
 
 /** Map effect identity to the explicit workflow preset table. */
@@ -742,7 +751,7 @@ void defineReferenceControls(OfxParamSetHandle set, OfxPropertySetHandle page, E
         require(properties->propSetString(choice, kOfxParamPropChoiceOption, static_cast<int>(i), presets[i].label), "reference preset option");
     optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
         kind == EffectKind::Defects
-            ? "Параметры отдельных нод with_defects. Поверхностные пресеты включают Comfy Damage Model и Physical material. Development, mixed/hair, softness окна и RNG ещё не полностью перенесены; mapped не означает полное совпадение цепочки. Собственные варианты сохраняй в My Presets."
+            ? "Параметры отдельных нод with_defects. Поверхностные пресеты включают Comfy Damage Model и Physical material. Surface mixed/hair, softness окна и RNG ещё не полностью перенесены; mapped не означает полное совпадение цепочки. Собственные варианты сохраняй в My Presets."
             : "Настройки из Видео-в-Хронику-по-этапам_with_defects.json. Выбор списка сам по себе ничего не меняет: нажми Apply Reference Preset. Для чистого A/B используй новую ноду без анимации. Print в workflow имеет grain_strength=0; Grain only включает собственное зерно позитива отдельно."), "reference preset hint");
     require(parameters->paramDefine(set, kOfxParamTypePushButton, "apply_reference_preset", &button), "define apply reference preset");
     require(properties->propSetString(button, kOfxPropLabel, 0, "Apply Reference Preset"), "apply reference label");
@@ -842,7 +851,7 @@ UserPresetTarget userPresetTarget(OfxParamSetHandle set, const silentfilm::UserP
         require(parameters->paramGetPropertySet(target.handle, &props), "preset target properties");
         if (!props) throw Failure(kOfxStatErrBadHandle, "Host returned empty preset parameter properties");
         const bool choice = id == "encoding" || id == "playback_mode" || id == "material" || id == "pattern"
-            || id == "mix_response" || id == "damage_type";
+            || id == "mix_response" || id == "damage_type" || id == "development_model";
         const bool boolean = id == "preview_positive";
         if (choice || boolean) {
             int count = 2;
@@ -872,6 +881,16 @@ UserPresetTarget userPresetTarget(OfxParamSetHandle set, const silentfilm::UserP
     } else require(parameters->paramGetValueAtTime(target.handle, time, &value), "snapshot preset double");
     target.oldValue = {id, target.integer, value};
     return target;
+}
+
+/** Upgrade pre-0.36 complete Defects snapshots in memory, retaining the old development model. */
+void completeLegacyDevelopmentPreset(silentfilm::UserPreset& preset, EffectKind kind, std::size_t targetCount)
+{
+    if (kind != EffectKind::Defects || preset.values.size() + 2 != targetCount) return;
+    for (const auto& value : preset.values)
+        if (value.id == "development_model" || value.id == "development_fog") return;
+    preset.values.push_back({"development_model", true, 0});
+    preset.values.push_back({"development_fog", false, 0.15});
 }
 
 /** Handle disk I/O only on explicit UI actions, with preflight and rollback on host setter failure. */
@@ -951,9 +970,10 @@ OfxStatus userPresetChanged(OfxImageEffectHandle effect, Instance& state, const 
         char* value = nullptr;
         require(parameters->paramGetValue(state.userPresetFile, &value), "preset file to apply");
         const std::string file(value ? value : "");
-        const auto loaded = !file.empty() && silentfilm::userPresetFileName(file) == name
+        auto loaded = !file.empty() && silentfilm::userPresetFileName(file) == name
             ? silentfilm::loadUserPresetFile(file, snapshot.effect)
             : silentfilm::loadUserPreset(libraryRoot(), snapshot.effect, name);
+        completeLegacyDevelopmentPreset(loaded, state.kind, targets.size());
         if (loaded.values.size() != targets.size()) throw Failure(kOfxStatErrValue, "Набор параметров пресета не соответствует этой версии OFX");
         std::vector<silentfilm::UserPresetValue> values;
         for (const auto& target : targets) {
@@ -1006,7 +1026,8 @@ OfxStatus changed(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     }
     if (name && instance(effect).kind == EffectKind::Defects
         && (std::strcmp(name, "material") == 0 || std::strcmp(name, "pattern") == 0
-            || std::strcmp(name, "scratch_wander") == 0 || std::strcmp(name, "amount_variation") == 0)) {
+            || std::strcmp(name, "scratch_wander") == 0 || std::strcmp(name, "amount_variation") == 0
+            || std::strcmp(name, "development_model") == 0 || std::strcmp(name, "damage_type") == 0)) {
         updateDefectColorUi(instance(effect), actionTime(in));
         return kOfxStatOK;
     }
@@ -1303,10 +1324,20 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         const char* damageModels[] = {"Legacy 0.29", "Comfy surface", "Comfy emulsion loss", "Comfy dirty"};
         for (int i = 0; i < 4; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i, damageModels[i]), "defect damage option");
         require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "defect damage default");
+        const auto damageProps = choice;
+        require(parameters->paramDefine(set, kOfxParamTypeChoice, "development_model", &choice), "define development model");
+        require(properties->propSetString(choice, kOfxPropLabel, 0, "Development Pattern"), "development model label");
+        const char* developmentModels[] = {"Legacy 0.35", "Comfy mottling", "Comfy streaks", "Comfy mixed"};
+        for (int i = 0; i < 4; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i, developmentModels[i]), "development model option");
+        require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "development model default");
         optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
-            "Legacy сохраняет вид прежних проектов. Comfy: неровные формы и временная модель пыли/царапин. Surface — плотность 0,65×маска; Dirty — 1,5×маска; Emulsion loss — снятая эмульсия царапин/пятен, пыль остаётся непрозрачной. Для Capture/Printing/Projector все Comfy-варианты дают тень окна. Для сравнения с Comfy выбери Physical material и Blend=1. Проявка пока остаётся прежней."), "defect damage hint");
+            "Для Pattern=Development: mottling — пятнистость плотности, streaks — продольные полосы, mixed — 65% пятнистости +35% полос. Bicubic-поле плавно меняется по Persistence; Irregularity=0 фиксирует его. Legacy сохраняет старую проявку. Для сравнения Comfy выбери Physical material/Blend1."), "development model hint");
+        defineDouble(set, "development_fog", "Development Fog",
+            "Дополнительная положительная плотность неоднородной проявки. 0 — без fog; старт0,15, ползунок до0,3, вручную до1. На негативе повышает яркость после Print, на позитиве затемняет. Действует вместе со Strength, только в новых Comfy Development Pattern.", 0, 1, 0.15);
+        optionalProperty(properties->propSetString(damageProps, kOfxParamPropHint, 0,
+            "Legacy сохраняет вид прежних проектов. Comfy: неровные формы и временная модель пыли/царапин. Surface — плотность 0,65×маска; Dirty — 1,5×маска; Emulsion loss — снятая эмульсия царапин/пятен, пыль остаётся непрозрачной. Для Capture/Printing/Projector все Comfy-варианты дают тень окна. Для сравнения с Comfy выбери Physical material и Blend=1. Для проявки используй отдельный Development Pattern."), "defect damage hint");
         defineDouble(set, "irregularity", "Irregularity",
-            "Неровность формы и движения в моделях Comfy. 0 — ровные контуры/полосы; 0,6 — старт. Управляет эллиптическим контуром пыли/пятен, наклоном и прерывистостью царапин, шевелением пыли окна. Legacy и Development пока не используют параметр. Scratch Wander добавляет отдельное гуляние; для сравнения Comfy оставь его 0.", 0, 1, 0.6);
+            "Неровность формы и движения в моделях Comfy. 0 — ровные контуры/полосы; 0,6 — старт. Управляет эллиптическим контуром пыли/пятен, наклоном и прерывистостью царапин, шевелением пыли окна. В новой Development управляет долей меняющегося поля: 0 — неподвижное, 1 — полностью меняющееся. Legacy его не использует. Scratch Wander добавляет отдельное гуляние; для сравнения Comfy оставь его 0.", 0, 1, 0.6);
         defineDouble(set, "strength", "Strength",
             "В Perceptual — непрозрачность полного рисунка: 0 выключено, 0,5 половина, 1 полная сила; итоговая доля также умножается на Blend. Размер, seed и рисунок сохраняются. В Physical — прежняя сила маски/плотности материала, её вид после печати может быть нелинейным.", 0, 1, 0.15);
         defineDouble(set, "size", "Size (% width)", "Размер частиц, ширина царапины или размер поля относительно ширины кадра. Для пыли начните с 0,05–0,15; для пятен проявки — 5–15.", 0.01, 50, 0.12);
@@ -1351,9 +1382,9 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
             "В обычной цепочке оставь sRGB. У Negative/Printing gamma не применяется: это физическое пропускание и поле отключено. У Capture/Positive/Projector ручной override нужен только при использовании ноды отдельно. Comfy color only восстанавливает sRGB, не меняя рисунок/силу."), "defect transfer contract hint");
         choice = page;
-        const char* children[] = {"blend", "mix_response", "material", "pattern", "damage_type", "irregularity", "strength", "size", "size_spread", "thickness_spread", "edge_bias",
+        const char* children[] = {"blend", "mix_response", "material", "pattern", "damage_type", "development_model", "development_fog", "irregularity", "strength", "size", "size_spread", "thickness_spread", "edge_bias",
             "scratch_wander", "scratch_wander_time", "amount", "amount_variation", "amount_drift_time", "persistence", "seed", "encoding"};
-        for (int i = 0; i < 19; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
+        for (int i = 0; i < 21; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
         defineReferenceControls(set, page, kind);
         return kOfxStatOK;
     }
@@ -1434,6 +1465,8 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "mix_response", &state->defectMixResponse, nullptr), "defect mix response parameter");
         require(parameters->paramGetHandle(set, "damage_type", &state->defectDamage, nullptr), "defect damage parameter");
         require(parameters->paramGetHandle(set, "irregularity", &state->defectIrregularity, nullptr), "defect irregularity parameter");
+        require(parameters->paramGetHandle(set, "development_model", &state->defectDevelopment, nullptr), "defect development parameter");
+        require(parameters->paramGetHandle(set, "development_fog", &state->defectDevelopmentFog, nullptr), "defect development fog parameter");
         require(parameters->paramGetHandle(set, "size", &state->defectSize, nullptr), "defect size parameter");
         require(parameters->paramGetHandle(set, "size_spread", &state->defectSizeSpread, nullptr), "defect size spread parameter");
         require(parameters->paramGetHandle(set, "thickness_spread", &state->defectThicknessSpread, nullptr), "defect thickness spread parameter");
@@ -1789,7 +1822,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     silentfilm::DefectParameters defects;
     if (isDefects) {
         int material = 0, pattern = 0, persistence = 48, seed = 1925, transfer = 1, mixResponse = 0;
-        int damage = 0;
+        int damage = 0, development = 0;
+        double developmentFog = 0.15;
         double irregularity = 0.6;
         double strength = 0.15, size = 0.12, amount = 3, blend = 1;
         double sizeSpread = 35, thicknessSpread = 35, edgeBias = 0, wander = 0, wanderTime = 8;
@@ -1801,6 +1835,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         require(parameters->paramGetValueAtTime(state.defectMixResponse, time, &mixResponse), "read defect mix response");
         require(parameters->paramGetValueAtTime(state.defectDamage, time, &damage), "read defect damage");
         require(parameters->paramGetValueAtTime(state.defectIrregularity, time, &irregularity), "read defect irregularity");
+        require(parameters->paramGetValueAtTime(state.defectDevelopment, time, &development), "read development model");
+        require(parameters->paramGetValueAtTime(state.defectDevelopmentFog, time, &developmentFog), "read development fog");
         require(parameters->paramGetValueAtTime(state.defectSize, time, &size), "read defect size");
         require(parameters->paramGetValueAtTime(state.defectSizeSpread, time, &sizeSpread), "read defect size spread");
         require(parameters->paramGetValueAtTime(state.defectThicknessSpread, time, &thicknessSpread), "read defect thickness spread");
@@ -1814,6 +1850,7 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         require(parameters->paramGetValueAtTime(state.defectSeed, time, &seed), "read defect seed");
         require(parameters->paramGetValueAtTime(state.encoding, time, &transfer), "read defect transfer");
         if (material < 0 || material > 4 || pattern < 0 || pattern > 3 || persistence < 1 || damage < 0 || damage > 3
+            || development < 0 || development > 3 || !std::isfinite(developmentFog) || developmentFog < 0 || developmentFog > 1
             || !std::isfinite(irregularity) || irregularity < 0 || irregularity > 1
             || !std::isfinite(strength) || strength < 0 || strength > 1 || !std::isfinite(size) || size < 0.01 || size > 50
             || !std::isfinite(amount) || amount < 0 || amount > 24 || transfer < 0 || transfer > 2)
@@ -1835,6 +1872,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         defects.mixResponse = static_cast<silentfilm::DefectMixResponse>(mixResponse);
         defects.damage = static_cast<silentfilm::DefectDamage>(damage);
         defects.irregularity = static_cast<float>(irregularity);
+        defects.development = static_cast<silentfilm::DefectDevelopment>(development);
+        defects.developmentFog = static_cast<float>(developmentFog);
         defects.amount = static_cast<float>(amount); defects.persistence = persistence;
         defects.sizeSpreadPercent = static_cast<float>(sizeSpread);
         defects.thicknessSpreadPercent = static_cast<float>(thicknessSpread);
@@ -2069,7 +2108,7 @@ OfxPlugin plugins[] = {
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 35, setHost, entry<EffectKind::Negative>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 35, setHost, entry<EffectKind::Print>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 35, setHost, entry<EffectKind::Projector>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 35, setHost, entry<EffectKind::Defects>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 36, setHost, entry<EffectKind::Defects>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 35, setHost, entry<EffectKind::CameraOptics>},
 };
 

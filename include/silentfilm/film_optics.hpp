@@ -29,6 +29,7 @@ enum class DefectMaterial : int { Capture = 0, Negative = 1, Printing = 2, Posit
 enum class DefectPattern : int { Dust = 0, Scratches = 1, Stains = 2, Development = 3 };
 enum class DefectMixResponse : int { Perceptual = 0, Physical = 1 };
 enum class DefectDamage : int { Legacy = 0, Surface = 1, EmulsionLoss = 2, Dirty = 3 };
+enum class DefectDevelopment : int { Legacy = 0, Mottling = 1, Streaks = 2, Mixed = 3 };
 struct DefectParameters {
     DefectMaterial material = DefectMaterial::Capture;
     DefectPattern pattern = DefectPattern::Dust;
@@ -47,6 +48,8 @@ struct DefectParameters {
     DefectMixResponse mixResponse = DefectMixResponse::Perceptual;
     DefectDamage damage = DefectDamage::Legacy;
     float irregularity = 0.6f;
+    DefectDevelopment development = DefectDevelopment::Legacy;
+    float developmentFog = 0.15f;
     int persistence = 48;
     std::uint32_t seed = 1925;
     double time = 0; // Секунды от начала клипа; OFX adapter переводит frame time до вызова core.

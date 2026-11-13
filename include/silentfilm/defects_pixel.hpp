@@ -16,6 +16,15 @@ struct DefectParticle {
     float opacity = 1, gapTop = 1, gapBottom = 1, support = 0;
 };
 
+/** Bounded per-frame coarse field; pointers are local to the CPU action or CUDA stream. */
+struct DefectDevelopmentField {
+    const float* values = nullptr;
+    int width = 1, height = 1, columns = 2, rows = 2;
+    int mottlingCount = 0, count = 0;
+    std::uint32_t knot = 0;
+    float weight = 0;
+};
+
 /** Small immutable per-frame geometry; never contains a host image pointer. */
 struct DefectFrame {
     DefectParameters parameters;
@@ -24,6 +33,7 @@ struct DefectFrame {
     float cell = 2;
     std::uint32_t base = 0;
     float effectiveAmount = 0;
+    DefectDevelopmentField development;
 };
 
 /** Evaluate particle placement once per frame instead of once per pixel. */
@@ -86,8 +96,93 @@ SILENTFILM_DEFECT_HD inline float lattice(std::uint32_t base, int x, int y) noex
         ^ (static_cast<std::uint32_t>(y) * 0x85ebca6bu)) * 2 - 1;
 }
 
+/** Native deterministic coarse knots; the interpolation model matches Comfy, not its Python RNG. */
+SILENTFILM_DEFECT_HD inline float developmentKnot(std::uint32_t seed, bool streaks,
+    std::uint32_t knot, int index, bool stationary = false) noexcept
+{
+    return 2 * unit(seed ^ (streaks ? 0x53545245u : 0x4d4f5454u)
+        ^ film::hash(knot ^ (stationary ? 0x53544154u : 0x54494d45u))
+        ^ (static_cast<std::uint32_t>(index) * 0x9e3779b9u)) - 1;
+}
+
+/** Blend coarse grids in time before spatial interpolation, as in the reference tensor operations. */
+SILENTFILM_DEFECT_HD inline float developmentNode(const DefectFrame& frame, bool streaks, int index) noexcept
+{
+    const auto& p = frame.parameters;
+    const auto& grid = frame.development;
+    const float fixed = p.irregularity < 1 ? developmentKnot(p.seed, streaks, 0, index, true) : 0;
+    if (p.irregularity == 0) return fixed;
+    const float a = developmentKnot(p.seed, streaks, grid.knot, index);
+    const float b = developmentKnot(p.seed, streaks, grid.knot + 1, index);
+    const float moving = a + (b - a) * grid.weight;
+    return p.irregularity < 1 ? fixed + (moving - fixed) * p.irregularity : moving;
+}
+
+/** Generate one packed grid sample on CPU or GPU without an image-sized mask. */
+SILENTFILM_DEFECT_HD inline float developmentGridValue(const DefectFrame& frame, int index) noexcept
+{
+    const bool streaks = index >= frame.development.mottlingCount;
+    return developmentNode(frame, streaks, streaks ? index - frame.development.mottlingCount : index);
+}
+
+SILENTFILM_DEFECT_HD inline float cubicWeight(float distance) noexcept
+{
+    const float x = ::fabsf(distance);
+    // Bicubic PyTorch использует кубическое ядро Keys с a=-0.75.
+    return x <= 1 ? ((1.25f * x - 2.25f) * x) * x + 1
+        : x < 2 ? ((-0.75f * x + 3.75f) * x - 6) * x + 3 : 0;
+}
+
+/** Reproduce bicubic align_corners=False, including replicated edge samples and post-filter clamp. */
+SILENTFILM_DEFECT_HD inline float developmentBicubic(float px, float py, bool streaks,
+    const DefectFrame& frame) noexcept
+{
+    const auto& grid = frame.development;
+    const int rows = streaks ? 2 : grid.rows;
+    const float sx = px * (static_cast<float>(grid.columns) / grid.width) - 0.5f;
+    const float sy = py * (static_cast<float>(rows) / grid.height) - 0.5f;
+    const int ix = static_cast<int>(::floorf(sx)), iy = static_cast<int>(::floorf(sy));
+    const float tx = sx - ix, ty = sy - iy;
+    const float wx[4] = {cubicWeight(tx + 1), cubicWeight(tx), cubicWeight(1 - tx), cubicWeight((1 - tx) + 1)};
+    const float wy[4] = {cubicWeight(ty + 1), cubicWeight(ty), cubicWeight(1 - ty), cubicWeight((1 - ty) + 1)};
+    float result = 0;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+    for (int j = 0; j < 4; ++j) {
+        const int y = iy + j - 1 < 0 ? 0 : iy + j - 1 >= rows ? rows - 1 : iy + j - 1;
+        float line = 0;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+        for (int i = 0; i < 4; ++i) {
+            const int x = ix + i - 1 < 0 ? 0 : ix + i - 1 >= grid.columns ? grid.columns - 1 : ix + i - 1;
+            const int index = y * grid.columns + x;
+            const float value = grid.values ? grid.values[(streaks ? grid.mottlingCount : 0) + index]
+                : developmentNode(frame, streaks, index);
+            line += value * wx[i];
+        }
+        result += line * wy[j];
+    }
+    return film::clamp(result, -1, 1);
+}
+
+SILENTFILM_DEFECT_HD inline float developmentField(float px, float py, const DefectFrame& frame) noexcept
+{
+    const auto mode = frame.parameters.development;
+    if (mode == DefectDevelopment::Streaks) return developmentBicubic(px, py, true, frame);
+    const float mottling = developmentBicubic(px, py, false, frame);
+    return mode == DefectDevelopment::Mixed ? mottling * 0.65f + developmentBicubic(px, py, true, frame) * 0.35f : mottling;
+}
+
 SILENTFILM_DEFECT_HD inline float development(float px, float py, const DefectFrame& frame) noexcept
 {
+    if (frame.parameters.development != DefectDevelopment::Legacy) {
+        const float field = developmentField(px, py, frame);
+        const float strength = frame.parameters.mixResponse == DefectMixResponse::Physical ? frame.parameters.strength : 1;
+        const float density = strength * (0.35f * field + 0.3f * frame.parameters.developmentFog * (field + 1) * 0.5f);
+        return ::powf(10.0f, -density);
+    }
     const int gx = static_cast<int>(::floorf(px / frame.cell)), gy = static_cast<int>(::floorf(py / frame.cell));
     const float fx = px / frame.cell - gx, fy = py / frame.cell - gy;
     const float a = lattice(frame.base, gx, gy), b = lattice(frame.base, gx + 1, gy);
@@ -159,7 +254,10 @@ SILENTFILM_DEFECT_HD inline float shade(float value, float multiplier, float cov
 {
     const bool physical = p.material == DefectMaterial::Negative || p.material == DefectMaterial::Printing;
     if (!physical) value = film::decode(value, p.transfer);
-    if (p.pattern == DefectPattern::Development) value *= multiplier;
+    if (p.pattern == DefectPattern::Development) {
+        value *= multiplier;
+        if (p.development != DefectDevelopment::Legacy) value = film::clamp(value, 0, 1);
+    }
     else if (p.damage != DefectDamage::Legacy) {
         const bool gate = p.material == DefectMaterial::Capture || p.material == DefectMaterial::Printing
             || p.material == DefectMaterial::Projector;
@@ -227,7 +325,7 @@ SILENTFILM_DEFECT_HD inline Pixel apply(Pixel original, float px, float py, int 
 }
 } // namespace defect
 
-/** Run one fused CUDA pass without masks, scratch images or CPU transfers. */
+/** Run one fused image pass; development additionally prepares only a bounded coarse GPU grid. */
 CudaStatus renderCudaDefects(ImageView source, ImageView output, RenderWindow window,
     const DefectParameters& parameters, void* stream, bool hostStreamProvided) noexcept;
 

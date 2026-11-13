@@ -63,7 +63,7 @@ def check_presets(args):
         node = nodes[preset["node"]]; widgets = node["widgets_values"]; values = preset["values"]
         development = node["type"].endswith("Development")
         damage = node["type"].endswith("Damage")
-        expected = {"strength": widgets[0], "blend": 1, "mix_response": 0 if development else 1, "encoding": 1, "size": widgets[2 if development else 4 if damage else 3],
+        expected = {"strength": widgets[0], "blend": 1, "mix_response": 1, "encoding": 1, "size": widgets[2 if development else 4 if damage else 3],
                     "persistence": widgets[4 if development else 5 if damage else 4], "seed": node["linked_seeds"]["seed"]}
         if not development:
             expected["amount"] = widgets[3 if damage else 2]
@@ -75,6 +75,8 @@ def check_presets(args):
         else:
             expected["damage_type"] = 1
         expected["irregularity"] = widgets[5 if development else 6 if damage else 5]
+        expected["development_model"] = {"mottling": 1, "streaks": 2, "mixed": 3}[widgets[1]] if development else 0
+        expected["development_fog"] = widgets[3] if development else 0.15
         expected.update(size_spread=35, thickness_spread=35, amount_variation=0, amount_drift_time=48)
         scratches = widgets[1] == "scratches"
         expected["scratch_wander"] = 0

@@ -152,6 +152,17 @@ int main(int argc, char** argv)
         fixture::check(fixture::instanceData && fixture::resetCalls == 0 && fixture::optionWrites == 0
             && fixture::valueWrites == 0 && fixture::propertyReads == 0, "CreateInstance must not mutate the preset UI");
         auto& state = instance(effect);
+        {
+            silentfilm::UserPreset legacy{"com.alexz.silentfilm.defects", "Старый", userPresetParameters(EffectKind::Defects)};
+            const auto count = legacy.values.size();
+            legacy.values.erase(std::remove_if(legacy.values.begin(), legacy.values.end(), [](const auto& value) {
+                return value.id == "development_model" || value.id == "development_fog";
+            }), legacy.values.end());
+            completeLegacyDevelopmentPreset(legacy, EffectKind::Defects, count);
+            fixture::check(legacy.values.size() == count && legacy.values[count - 2].id == "development_model"
+                && legacy.values[count - 2].value == 0 && legacy.values.back().value == 0.15,
+                "Old Defects presets must keep Legacy development when new controls are missing");
+        }
         fixture::params.at("user_preset_name").text = "Моя оптика";
         userPresetChanged(effect, state, "save_user_preset", 12, root.string());
         const auto file = root / "com.alexz.silentfilm.cameraoptics" / "Моя оптика.sfpreset";

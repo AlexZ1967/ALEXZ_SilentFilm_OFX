@@ -1,5 +1,17 @@
 # Состояние проекта для нового диалога
 
+## Defects development0.36 — 2026-11-14
+
+✅ **2026-11-14 — пользователь подтвердил: «все тесты прошли, проверил руками — работает», запросил commit/push.** Подтверждён предложенный набор проверок0.36 и ручная работа новой проявки. Полные логи/число тестов/максимальные ошибки сравнения и численные замеры скорости не предоставлены. Агент сборки/CTest/Python comparison/Resolve не запускал.
+
+✅ **2026-11-14 — по запросу следующего этапа подготовлена новая проявка:** DefectDevelopment Legacy0/Mottling1/Streaks2/Mixed3 и developmentFog. Бounded coarse grids2–128, temporal smoothstep по физическому кадру/Persistence, stationary blend по Irregularity, bicubic a=−0.75 align_corners=False с replicated boundaries и clamp каждого слоя до mixed65/35. Плотность Strength×(0.35field+0.3fog(field+1)/2); Physical соответствует Comfy, Perceptual сохраняет отдельную видимую интерполяцию. Legacy/default не меняет старый вид. Reference n15 Mottling, n18 Streaks, Physical/Fog0.15/Irregularity0.6; n18Strength0 сохранён. Новые controls/hints/enabled UI и тонкая шкала Fog0–0.3, полный max1. CMake0.36, minorDefects36 (остальные35).
+
+GPU: gridNode producer +один image pass, до65KiB stream-ordered allocation, без host grid/image transfers/readback/full masks. CPU одна малая локальная vector-сетка; direct helper без cached grid допустим для диагностик. У host images lifetime action-local, shared/mutable frame state не добавлен. RNG NativeHash остаётся явным отличием. Старыe полные My Presets Defects0.31–0.35 мигрируются в памяти с Legacy/Fog0.15; схема v1 и файл не переписываются.
+
+Прочитаны целевые Comfy development_field/ветка density и первичный PyTorch UpSample.h (коэффициент/координаты). Подготовлены CPU/CUDA regressions/свойства grids/time/fog/alpha/ROI и миграция preset. Новый `tests/compare_comfy_development.py --backend cpu|cuda` вызывает native `--dump-development`, подаёт общие сырые knot grids в реальный Comfy-reference и сравнивает27 вариантов temporal/bicubic/clamp/density; CUDA использует production renderer для RGBA, Torch reference CPU. Не заявлять равенство RNG/полной цепочки.
+
+**Проверки выполнены пользователем, агент их не запускал; численная оценка ускорения отсутствует.** [Команды и ручные сценарии](DEFECTS_DEVELOPMENT_0.36.md). Следующий этап — surface mixed с отдельными dust/scratches/stains, волоски и Projector Gate softness. Срез0.36 оформляется к публикации по запросу пользователя.
+
 ✅ **2026-11-14 —0.35 опубликована:** [4179a1d](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/4179a1d), main; push `7294774..4179a1d` подтверждён Git. Пользователь подтвердил работу точных шкал; следующий блок — development/bicubic/fog. Агент проверки не запускал.
 
 ## Точные шкалы OFX0.35 — 2026-11-14

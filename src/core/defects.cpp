@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace silentfilm {
 namespace {
@@ -30,7 +31,23 @@ DefectFrame prepareDefects(const DefectParameters& p, int width, int height)
     const auto frame = static_cast<std::int64_t>(std::floor(p.time * p.frameRate + 1e-9));
     const auto event = static_cast<std::int64_t>(std::floor(static_cast<double>(frame) / std::max(1, p.persistence)));
     result.base = p.seed ^ film::hash(static_cast<std::uint32_t>(event)) ^ 0x27d4eb2du;
-    if (p.pattern == DefectPattern::Development) return result;
+    if (p.pattern == DefectPattern::Development) {
+        if (p.development != DefectDevelopment::Legacy) {
+            auto& grid = result.development;
+            grid.width = std::max(1, width); grid.height = std::max(1, height);
+            const double spacing = std::max(1.0, width * static_cast<double>(p.size) / 100);
+            grid.rows = std::clamp(static_cast<int>(std::ceil(height / spacing)) + 1, 2, 128);
+            grid.columns = std::clamp(static_cast<int>(std::ceil(width / spacing)) + 1, 2, 128);
+            const double time = static_cast<double>(frame) / std::max(1, p.persistence);
+            const double knot = std::floor(time);
+            const float t = static_cast<float>(time - knot);
+            grid.knot = static_cast<std::uint32_t>(static_cast<std::int64_t>(knot));
+            grid.weight = t * t * (3 - 2 * t);
+            grid.mottlingCount = p.development == DefectDevelopment::Streaks ? 0 : grid.rows * grid.columns;
+            grid.count = grid.mottlingCount + (p.development == DefectDevelopment::Mottling ? 0 : 2 * grid.columns);
+        }
+        return result;
+    }
     float amount = p.amount;
     if (p.amountVariationPercent > 0)
         amount *= std::max(0.0f, 1 + p.amountVariationPercent * 0.01f
@@ -133,7 +150,11 @@ bool renderDefectsCpu(ImageView source, ImageView output, RenderWindow window,
 {
     const int width = source.x2 - source.x1, height = source.y2 - source.y1;
     if (width <= 0 || height <= 0) return true;
-    const auto frame = prepareDefects(p, width, height);
+    auto frame = prepareDefects(p, width, height);
+    std::vector<float> coarse(static_cast<std::size_t>(frame.development.count));
+    for (int i = 0; i < frame.development.count; ++i)
+        coarse[static_cast<std::size_t>(i)] = defect::developmentGridValue(frame, i);
+    if (!coarse.empty()) frame.development.values = coarse.data();
     const int x1 = std::max(window.x1, output.x1), x2 = std::min(window.x2, output.x2);
     const int y1 = std::max(window.y1, output.y1), y2 = std::min(window.y2, output.y2);
     for (int y = y1; y < y2; ++y) {

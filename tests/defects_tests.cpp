@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "development_fixtures.hpp"
 
 namespace {
 using namespace silentfilm;
@@ -413,6 +414,71 @@ void comfyMaterials()
         "Comfy-style geometry depends on render order");
     require(first.particles[0].x != next.particles[0].x, "Film dust must change each physical frame");
 }
+/** Exercise development independently of legacy material masks and confirm deterministic time semantics. */
+void developmentProperties()
+{
+    DefectParameters p;
+    p.pattern = DefectPattern::Development; p.development = DefectDevelopment::Mixed;
+    p.mixResponse = DefectMixResponse::Physical; p.amount = 0; p.size = 0.01f; p.strength = 0.37f;
+    auto capped = prepareDefects(p, 8192, 4320);
+    require(capped.development.rows == 128 && capped.development.columns == 128
+        && capped.development.count == 128 * 128 + 2 * 128, "Development coarse grid is not bounded");
+    p.size = 8; p.irregularity = 0; p.time = 0;
+    const auto stationary = prepareDefects(p, 31, 19);
+    p.time = 100 / p.frameRate;
+    const auto later = prepareDefects(p, 31, 19);
+    for (int i = 0; i < stationary.development.count; ++i)
+        require(defect::developmentGridValue(stationary, i) == defect::developmentGridValue(later, i),
+            "Irregularity zero must freeze development across events");
+    p.irregularity = 0.6f; p.time = 23 / p.frameRate; p.persistence = 24;
+    const auto a = prepareDefects(p, 31, 19);
+    p.time = 24 / p.frameRate;
+    const auto b = prepareDefects(p, 31, 19);
+    p.time = 23 / p.frameRate;
+    const auto repeated = prepareDefects(p, 31, 19);
+    require(a.development.knot == 0 && b.development.knot == 1, "Development knot timing is wrong");
+    float difference = 0;
+    for (int i = 0; i < a.development.count; ++i) {
+        const float value = defect::developmentGridValue(a, i);
+        difference = std::max(difference, std::abs(value - defect::developmentGridValue(b, i)));
+        require(value == defect::developmentGridValue(repeated, i), "Development depends on request order");
+    }
+    require(difference > 0 && difference < 0.02f, "Development jumps at the persistence boundary");
+    const float x = 12.5f, y = 8.5f;
+    p.development = DefectDevelopment::Mottling; const auto mottling = prepareDefects(p, 31, 19);
+    p.development = DefectDevelopment::Streaks; const auto streaks = prepareDefects(p, 31, 19);
+    p.development = DefectDevelopment::Mixed; const auto mixed = prepareDefects(p, 31, 19);
+    const float expected = defect::developmentField(x, y, mottling) * 0.65f + defect::developmentField(x, y, streaks) * 0.35f;
+    require(std::abs(defect::developmentField(x, y, mixed) - expected) < 2e-6f, "Mixed development uses wrong layer weights");
+    auto cached = mixed;
+    std::vector<float> grid(static_cast<std::size_t>(cached.development.count));
+    for (int i = 0; i < cached.development.count; ++i) grid[static_cast<std::size_t>(i)] = defect::developmentGridValue(cached, i);
+    cached.development.values = grid.data();
+    require(std::abs(defect::developmentField(x, y, cached) - expected) < 2e-6f,
+        "Prepared development lattice differs from procedural evaluation");
+    p.developmentFog = 0;
+    const float withoutFog = defect::development(x, y, prepareDefects(p, 31, 19));
+    p.developmentFog = 1;
+    require(defect::development(x, y, prepareDefects(p, 31, 19)) <= withoutFog, "Development fog must add positive density");
+    p.blend = 0;
+    require(prepareDefects(p, 31, 19).development.count == 0, "Bypass should not prepare development grids");
+    for (int mode = 1; mode <= 3; ++mode)
+        for (int material : {1, 3})
+            for (int alpha = 0; alpha < 4; ++alpha)
+                for (float irregularity : {0.0f, 0.6f, 1.0f}) {
+                    DefectParameters q;
+                    q.pattern = DefectPattern::Development; q.development = static_cast<DefectDevelopment>(mode);
+                    q.material = static_cast<DefectMaterial>(material); q.amount = 0; q.size = 8;
+                    q.irregularity = irregularity; q.time = 1.375; q.developmentFog = 0.15f;
+                    q.sourcePremultiplied = alpha % 2; q.outputPremultiplied = alpha / 2;
+                    for (auto response : {DefectMixResponse::Physical, DefectMixResponse::Perceptual}) {
+                        q.mixResponse = response; run(q, true, false);
+#ifdef SILENTFILM_TEST_CUDA
+                        if (alpha == 0) run(q, false, false);
+#endif
+                    }
+                }
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -424,7 +490,8 @@ int main(int argc, char** argv)
         if (status == cudaErrorNoDevice || (status == cudaSuccess && count == 0)) return 77;
         require(status == cudaSuccess, "CUDA device query failed");
 #endif
-        timingAndBypass(); particleControls(); negativePrintOpacity(); comfyMaterials();
+        if (argc == 3 && std::string(argv[1]) == "--dump-development") { development_fixture::dump(argv[2]); return 0; }
+        timingAndBypass(); particleControls(); negativePrintOpacity(); comfyMaterials(); developmentProperties();
         for (int material = 0; material < 5; ++material) {
             for (int pattern = 0; pattern < 4; ++pattern) {
                 for (int mode = 0; mode < 4; ++mode) {
