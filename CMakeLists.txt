@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ALEXZSilentFilmOFX VERSION 0.34.0 LANGUAGES CXX)
+project(ALEXZSilentFilmOFX VERSION 0.35.0 LANGUAGES CXX)
 
 option(SILENTFILM_ENABLE_CUDA "Собрать CUDA backend и тест сравнения CPU/CUDA" OFF)
 option(SILENTFILM_BUILD_CADENCE "Собрать нативный каденс и launcher отдельного окна (Linux)" ON)

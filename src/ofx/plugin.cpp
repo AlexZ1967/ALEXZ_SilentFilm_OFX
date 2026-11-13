@@ -520,19 +520,67 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
     return kOfxStatOK;
 }
 
-/** Define one animated scalar diagnostic control. */
+struct NumericDisplay {
+    double low, high, increment;
+    int digits;
+};
+
+/** Set only GUI scale and precision, never the legal range or parameter value. */
+void setDoubleDisplay(OfxPropertySetHandle props, const NumericDisplay& display)
+{
+    require(properties->propSetDouble(props, kOfxParamPropDisplayMin, 0, display.low), "parameter display minimum");
+    require(properties->propSetDouble(props, kOfxParamPropDisplayMax, 0, display.high), "parameter display maximum");
+    require(properties->propSetDouble(props, kOfxParamPropIncrement, 0, display.increment), "parameter increment");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropDigits, 0, display.digits), "parameter display digits");
+}
+
+/** Choose fine working scales without narrowing existing preset or render contracts. */
+NumericDisplay numericDisplay(const char* id, double low, double high)
+{
+    struct Entry { const char* id; NumericDisplay display; };
+    static const Entry scales[] = {
+        {"exposure_ev", {-2, 2, 0.01, 2}}, {"contrast", {0.5, 1.5, 0.005, 3}},
+        {"highlight_softness", {0, 0.5, 0.005, 3}}, {"fog_strength", {0, 0.25, 0.001, 3}},
+        {"halation_strength", {0, 0.25, 0.001, 3}}, {"halation_size", {0.01, 0.5, 0.001, 3}},
+        {"grain_strength", {0, 0.03, 0.0001, 4}}, {"grain_size", {0.1, 4, 0.01, 2}},
+        {"edge_start", {0, 1.5, 0.005, 3}}, {"edge_end", {0.1, 2, 0.005, 3}},
+        {"edge_softness", {0, 0.2, 0.001, 3}}, {"camera_softness", {0, 0.3, 0.001, 3}},
+        {"focus_drift", {0, 0.1, 0.001, 3}},
+        {"capture_fps_min", {8, 36, 0.1, 1}}, {"capture_fps_max", {8, 36, 0.1, 1}},
+        {"crank_irregularity", {0, 0.6, 0.005, 3}}, {"shutter_fraction", {0, 1, 0.005, 3}},
+        {"motion_blur_strength", {0, 1.25, 0.005, 3}}, {"camera_shake", {0, 0.5, 0.001, 3}},
+        {"gate_weave_px", {0, 3, 0.01, 2}}, {"lamp_flicker", {0, 0.08, 0.001, 3}},
+        {"lamp_breathing", {0, 0.05, 0.0005, 4}},
+        {"glow_strength", {0, 0.3, 0.001, 3}}, {"glow_size", {0.05, 2, 0.005, 3}},
+        {"strength", {0, 1, 0.001, 3}}, {"size", {0.01, 0.2, 0.001, 3}},
+        {"size_spread", {0, 100, 1, 1}}, {"thickness_spread", {0, 100, 1, 1}},
+        {"scratch_wander", {0, 12, 0.1, 1}}, {"scratch_wander_time", {1, 48, 1, 1}},
+        {"amount", {0, 12, 0.1, 1}}, {"amount_variation", {0, 100, 1, 1}},
+        {"amount_drift_time", {1, 240, 1, 1}},
+    };
+    for (const auto& entry : scales) {
+        if (std::strcmp(id, entry.id) != 0) continue;
+        auto display = entry.display;
+        display.low = std::max(low, display.low); display.high = std::min(high, display.high);
+        return display;
+    }
+    return {low, high, 0.01, 2};
+}
+
+/** Define one animated scalar control with independent legal and working GUI ranges. */
 void defineDouble(OfxParamSetHandle set, const char* name, const char* label, const char* hint, double low, double high, double defaultValue = 0, const char* parent = nullptr)
 {
     OfxPropertySetHandle props = nullptr;
     require(parameters->paramDefine(set, kOfxParamTypeDouble, name, &props), "define double");
     require(properties->propSetString(props, kOfxPropLabel, 0, label), "parameter label");
-    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, hint), "parameter hint");
+    const auto display = numericDisplay(name, low, high);
+    const std::string fullHint = std::string(hint) + (display.low != low || display.high != high
+        ? " Ползунок охватывает рабочую область; значения за его пределами можно ввести вручную в полном допустимом диапазоне." : "");
+    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, fullHint.c_str()), "parameter hint");
     require(properties->propSetDouble(props, kOfxParamPropDefault, 0, defaultValue), "parameter default");
     require(properties->propSetDouble(props, kOfxParamPropMin, 0, low), "parameter minimum");
     require(properties->propSetDouble(props, kOfxParamPropMax, 0, high), "parameter maximum");
-    require(properties->propSetDouble(props, kOfxParamPropDisplayMin, 0, low), "parameter display minimum");
-    require(properties->propSetDouble(props, kOfxParamPropDisplayMax, 0, high), "parameter display maximum");
-    require(properties->propSetDouble(props, kOfxParamPropIncrement, 0, 0.01), "parameter increment");
+    setDoubleDisplay(props, display);
     if (parent) require(properties->propSetString(props, kOfxParamPropParent, 0, parent), "parameter parent");
 }
 
@@ -577,6 +625,19 @@ void updateDefectColorUi(Instance& state, double time)
     require(parameters->paramGetValueAtTime(state.defectAmountVariation, time, &variation), "defect amount variation UI value");
     const bool particles = pattern != static_cast<int>(silentfilm::DefectPattern::Development);
     const bool scratches = pattern == static_cast<int>(silentfilm::DefectPattern::Scratches);
+    OfxPropertySetHandle sizeProps = nullptr;
+    require(parameters->paramGetPropertySet(state.defectSize, &sizeProps), "defect size UI properties");
+    const bool stains = pattern == static_cast<int>(silentfilm::DefectPattern::Stains);
+    setDoubleDisplay(sizeProps, !particles ? NumericDisplay{0.5, 20, 0.1, 1}
+        : stains ? NumericDisplay{0.01, 3, 0.01, 2} : NumericDisplay{0.01, 0.2, 0.001, 3});
+    optionalProperty(properties->propSetString(sizeProps, kOfxPropLabel, 0,
+        !particles ? "Development Size (% width)" : stains ? "Stain Size (% width)"
+            : scratches ? "Scratch Width (% width)" : "Dust Size (% width)"), "defect size role label");
+    optionalProperty(properties->propSetString(sizeProps, kOfxParamPropHint, 0,
+        !particles ? "Масштаб поля проявки в процентах ширины. Рабочий ползунок 0,5–20; старт 5–15. Полный диапазон ручного ввода 0,01–50."
+        : stains ? "Диаметр пятна в процентах ширины. Ползунок 0,01–3; для заметных пятен начни с 1–3. Полный ручной диапазон 0,01–50."
+        : scratches ? "Толщина царапины в процентах ширины. Точный ползунок 0,01–0,20, шаг 0,001. Большие значения можно ввести вручную до50; разброс задаётся Thickness Spread."
+        : "Диаметр пылинки в процентах ширины. Обычно 0,01–0,10; ползунок до0,20 с шагом 0,001. Большие значения вводятся вручную до50; разброс задаётся Size Spread."), "defect size role hint");
     const auto enabled = [](OfxParamHandle handle, bool value) {
         OfxPropertySetHandle prop = nullptr;
         require(parameters->paramGetPropertySet(handle, &prop), "defect shape UI properties");
@@ -1006,7 +1067,7 @@ void defineFilmControls(OfxParamSetHandle set, EffectKind kind)
     require(properties->propSetInt(props, kOfxParamPropMin, 0, 0), "grain seed minimum");
     require(properties->propSetInt(props, kOfxParamPropMax, 0, 2147483647), "grain seed maximum");
     require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, 0), "grain seed display minimum");
-    require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 2147483647), "grain seed display maximum");
+    require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 10000), "grain seed display maximum");
     defineAdvancedColor(set);
     require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &props), "define film encoding");
     require(properties->propSetString(props, kOfxParamPropParent, 0, "advanced_color"), "film encoding group");
@@ -1083,7 +1144,7 @@ void defineCameraControls(OfxParamSetHandle set, bool opticsOnly = false)
     require(properties->propSetInt(focusProps, kOfxParamPropMin, 0, 0), "focus seed minimum");
     require(properties->propSetInt(focusProps, kOfxParamPropMax, 0, 2147483647), "focus seed maximum");
     require(properties->propSetInt(focusProps, kOfxParamPropDisplayMin, 0, 0), "focus seed display minimum");
-    require(properties->propSetInt(focusProps, kOfxParamPropDisplayMax, 0, 2147483647), "focus seed display maximum");
+    require(properties->propSetInt(focusProps, kOfxParamPropDisplayMax, 0, 10000), "focus seed display maximum");
     if (!opticsOnly) {
         defineDouble(set, "capture_fps_min", "Capture FPS Min",
             "Нижняя скорость съёмки, когда ручка замедляется. В режиме проекции это ускоряет действие. Старт 16 кадров/с; для проверки выберите Min=10, Max=30, Variation=1. Общая длительность клипа сохраняется.", 8, 36, 16);
@@ -1118,7 +1179,7 @@ void defineCameraControls(OfxParamSetHandle set, bool opticsOnly = false)
         require(properties->propSetInt(crankSeedProps, kOfxParamPropMin, 0, 0), "camera seed minimum");
         require(properties->propSetInt(crankSeedProps, kOfxParamPropMax, 0, 2147483647), "camera seed maximum");
         require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMin, 0, 0), "camera seed display minimum");
-        require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMax, 0, 2147483647), "camera seed display maximum");
+        require(properties->propSetInt(crankSeedProps, kOfxParamPropDisplayMax, 0, 10000), "camera seed display maximum");
     }
     OfxPropertySetHandle props = page;
     const char* children[] = {"playback_mode", "capture_fps_min", "capture_fps_max", "crank_variation", "crank_irregularity", "shutter_fraction", "motion_blur_strength", "exposure_variation", "exposure_samples", "camera_shake", "camera_seed", "focus_drift", "focus_seed", "vignette_strength", "edge_softness", "camera_softness", "edge_start", "edge_end"};
@@ -1160,8 +1221,8 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "exposure offset default");
         require(properties->propSetInt(props, kOfxParamPropMin, 0, -10000000), "exposure offset min");
         require(properties->propSetInt(props, kOfxParamPropMax, 0, 10000000), "exposure offset max");
-        require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, -10000), "exposure offset display min");
-        require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 10000), "exposure offset display max");
+        require(properties->propSetInt(props, kOfxParamPropDisplayMin, 0, -48), "exposure offset display min");
+        require(properties->propSetInt(props, kOfxParamPropDisplayMax, 0, 48), "exposure offset display max");
         require(properties->propSetInt(props, kOfxParamPropAnimates, 0, 0), "exposure offset not animated");
         optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0, "Номер кадра карты = time минус начало Source Frame Range плюс Frame Offset. После подрезки, если Resolve переобнуляет время OFX, укажи число срезанных кадров. Обычное перемещение клипа не требует сдвига. Изменение скорости готового результата пока не поддержано."), "exposure offset hint");
         require(parameters->paramDefine(set, kOfxParamTypePushButton, "reload_map", &props), "define map reload");
@@ -1192,7 +1253,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetInt(seedProps, kOfxParamPropMin, 0, 0), "projector seed min");
         require(properties->propSetInt(seedProps, kOfxParamPropMax, 0, 2147483647), "projector seed max");
         require(properties->propSetInt(seedProps, kOfxParamPropDisplayMin, 0, 0), "projector seed display min");
-        require(properties->propSetInt(seedProps, kOfxParamPropDisplayMax, 0, 2147483647), "projector seed display max");
+        require(properties->propSetInt(seedProps, kOfxParamPropDisplayMax, 0, 10000), "projector seed display max");
         defineDouble(set, "glow_strength", "Glow Strength",
             "Доля света, перераспределяемая рассеянием проекционной оптики. 0 выключает; начните с 0,05–0,15. Расчёт в линейном свете без порога и автоконтраста.", 0, 1, 0);
         defineDouble(set, "glow_size", "Glow Size",
@@ -1271,7 +1332,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetInt(choice, kOfxParamPropMin, 0, 1), "defect persistence minimum");
         require(properties->propSetInt(choice, kOfxParamPropMax, 0, 10000), "defect persistence maximum");
         require(properties->propSetInt(choice, kOfxParamPropDisplayMin, 0, 1), "defect persistence display minimum");
-        require(properties->propSetInt(choice, kOfxParamPropDisplayMax, 0, 10000), "defect persistence display maximum");
+        require(properties->propSetInt(choice, kOfxParamPropDisplayMax, 0, 120), "defect persistence display maximum");
         require(parameters->paramDefine(set, kOfxParamTypeInteger, "seed", &choice), "define defect seed");
         require(properties->propSetString(choice, kOfxPropLabel, 0, "Seed"), "defect seed label");
         optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0, "Независимый seed эффекта. При перемотке назад рисунок воспроизводится без накопленного состояния."), "defect seed hint");
@@ -1279,7 +1340,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetInt(choice, kOfxParamPropMin, 0, 0), "defect seed minimum");
         require(properties->propSetInt(choice, kOfxParamPropMax, 0, 2147483647), "defect seed maximum");
         require(properties->propSetInt(choice, kOfxParamPropDisplayMin, 0, 0), "defect seed display minimum");
-        require(properties->propSetInt(choice, kOfxParamPropDisplayMax, 0, 2147483647), "defect seed display maximum");
+        require(properties->propSetInt(choice, kOfxParamPropDisplayMax, 0, 10000), "defect seed display maximum");
         defineAdvancedColor(set);
         require(parameters->paramDefine(set, kOfxParamTypeChoice, "encoding", &choice), "define defect transfer");
         require(properties->propSetString(choice, kOfxParamPropParent, 0, "advanced_color"), "defect encoding group");
@@ -2002,14 +2063,14 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 34, setHost, entry<EffectKind::CrankExposure>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 35, setHost, entry<EffectKind::CrankExposure>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 6, setHost, entry<EffectKind::Probe>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 34, setHost, entry<EffectKind::Camera>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 34, setHost, entry<EffectKind::Negative>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 34, setHost, entry<EffectKind::Print>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 34, setHost, entry<EffectKind::Projector>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 34, setHost, entry<EffectKind::Defects>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 34, setHost, entry<EffectKind::CameraOptics>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 35, setHost, entry<EffectKind::Camera>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 35, setHost, entry<EffectKind::Negative>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 35, setHost, entry<EffectKind::Print>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 35, setHost, entry<EffectKind::Projector>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 35, setHost, entry<EffectKind::Defects>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 35, setHost, entry<EffectKind::CameraOptics>},
 };
 
 constexpr int pluginCount = static_cast<int>(sizeof(plugins) / sizeof(plugins[0]));
