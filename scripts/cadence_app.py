@@ -177,6 +177,7 @@ class Application:
                                    if key in self.PRESET_NUMBERS}
         self.preference_choices = {
             "exposure_mode": ("bake", ("bake", "ofx")),
+            "exposure_location": ("color", ("color", "fusion")),
             "blur_mode": ("flow_integrated", ("flow_integrated", "simple")),
             "compute_device": (args.backend, ("cuda", "cpu")),
             "format": ("prores", ("prores", "tiff")),
@@ -336,9 +337,13 @@ class Application:
         options = Gtk.Grid(column_spacing=12, row_spacing=6)
         form.append(options)
         self.exposure_mode = Gtk.DropDown.new_from_strings(["Bake Exposure", "Exposure via OFX"])
-        self.exposure_mode.set_tooltip_text("Bake — экспозиция в готовом видео. OFX — отдельная карта и попытка автоматически настроить SilentFilm Crank Exposure в Fusion: путь карты, Blend1, Frame Offset0. Blend меняется без пересчёта Cadence на странице Fusion. Если API откажет, появится инструкция ручной настройки. Выбор сохраняется в пресетах.")
+        self.exposure_mode.set_tooltip_text("Bake — экспозиция в готовом видео. OFX — отдельная карта и настроенная нода SilentFilm Crank Exposure. Exposure Location выбирает Color-пресет для каждого нового результата или прежний Fusion-маршрут. Blend меняется без пересчёта Cadence. Выбор сохраняется в пресетах.")
         options.attach(self.label("Crank Exposure", False), 0, 2, 1, 1)
         options.attach(self.exposure_mode, 1, 2, 2, 1)
+        self.exposure_location = Gtk.DropDown.new_from_strings(["Color", "Fusion"])
+        self.exposure_location.set_tooltip_text("Color — уникальный DRX с картой этого клипа, применяется только сразу после импорта нового результата. Blend доступен на Color. Fusion — прежний граф MediaIn/Crank Exposure/MediaOut. Существующие результаты/Color-графы автоматически не заменяются.")
+        options.attach(self.label("Exposure Location", False), 0, 3, 1, 1)
+        options.attach(self.exposure_location, 1, 3, 2, 1)
         self.backend = Gtk.DropDown.new_from_strings(["cuda", "cpu"])
         self.backend.set_selected(0 if self.args.backend == "cuda" else 1)
         self.backend.set_tooltip_text("cpu — нативная обработка на CPU; cuda — интеграция выдержки, shake и запекаемая экспозиция на GPU. Farneback оценивается на CPU OpenCV, flow-деформации и смешивание выполняются на CUDA. Exposure via OFX переносит применение экспозиции в отдельную ноду. Автоматический fallback при OOM не реализован.")
@@ -442,12 +447,13 @@ class Application:
         self.import_status = self.label("")
         self.import_status.set_tooltip_text("Последний результат импорта и привязки карты. Сохраняется при обновлении выделения. Назначение параметров не подтверждает успешную обработку кадра OFX.")
         outer.append(self.import_status)
-        outer.append(self.label("Exposure via OFX: карта назначается автоматически в Fusion → SilentFilm Crank Exposure. Затем Camera Optics → Negative → Print → Projector. При отказе API появится инструкция ручной настройки."))
+        outer.append(self.label("Exposure via OFX: Color — индивидуальный пресет результата; Fusion — отдельная композиция. Затем Camera Optics → Negative → Print → Projector. Итог назначения карты показан в «Последний импорт»."))
 
     def preference_widgets(self):
         """Map stable choices to controls while excluding clip paths and ranges."""
         return {"blur_mode": self.interpolation, "compute_device": self.backend,
                 "exposure_mode": self.exposure_mode,
+                "exposure_location": self.exposure_location,
                 "format": self.format, "input_transfer": self.transfer, "placement": self.placement,
                 "source_fps_mode": self.source_fps_mode,
                 "auto_import": self.auto_import, "preserve_alpha": self.preserve_alpha,
@@ -777,7 +783,7 @@ class Application:
                 self.submit({"action": "cache_clean", "root": root, "project_id": plan["project_id"],
                              "scope": scope, "timeline_id": plan.get("timeline_id"), "entries": entries}, cleaned)
             area = f'Таймлайн: {plan["timeline_name"]}' if scope == "timeline" else "Все таймлайны проекта"
-            self.message(f'Проект: {plan["project_name"]}\n{area}\nУдалить {len(entries)} результатов ({plan["bytes"] / (1024 ** 2):.1f} MiB)?\n\n{names}\n\nОни не используются на таймлайнах этого проекта. Файлы будут удалены вместе с их неиспользуемыми записями Media Pool. Undo монтажа не восстановит удалённые файлы. Папки других проектов не затрагиваются.', confirm=execute)
+            self.message(f'Проект: {plan["project_name"]}\n{area}\nУдалить {len(entries)} результатов ({plan["bytes"] / (1024 ** 2):.1f} MiB)?\n\n{names}\n\nОни не используются на таймлайнах этого проекта. Папки результатов будут удалены полностью, включая карты экспозиции, индивидуальные DRX-пресеты и промежуточные файлы, вместе с неиспользуемыми записями Media Pool. Undo монтажа не восстановит удалённые файлы. Папки других проектов не затрагиваются.', confirm=execute)
         def context_received(context):
             self.submit({"action": "cache_plan", "root": root, "project_id": context["project_id"],
                          "scope": scope, "timeline_id": context.get("timeline_id")}, planned)
@@ -904,6 +910,9 @@ class Application:
         if not Path(self.args.helper).is_file():
             raise RuntimeError("Сначала собери native helper: " + self.args.helper)
         require_flow_support(self.args.helper, request["blur_mode"], raw=self.ignore_processing.get_active(), exposure_mode=request["exposure_mode"])
+        if request["exposure_mode"] == "ofx" and self.exposure_location.get_selected() == 0:
+            from cadence_color_preset import validate_color_template
+            validate_color_template()
         snapshot = self.source_snapshot
         if self.job_target and not snapshot:
             raise RuntimeError("Для нового расчёта заново выбери клип таймлайна. Готовое задание можно импортировать без пересчёта.")
@@ -931,6 +940,7 @@ class Application:
             request["source_fps"] = source_interpretation_fps(fps_mode, request["source_fps"], context, snapshot)
             context["source_fps_mode"] = fps_mode
             context["capture_source_fps"] = request["source_fps"]
+            context["exposure_location"] = ("color", "fusion")[self.exposure_location.get_selected()]
             root_text = self.preferences.validate({"output_folder": self.root.get_text()})["output_folder"]
             root = Path(root_text).expanduser().resolve()
             context["source_name"] = snapshot["name"]
@@ -940,7 +950,7 @@ class Application:
             if self.batch_active():
                 self.batch.current["job"] = str(directory)
                 self.batch.save()
-            request["output_name"] = cadence_name(context["source_name"])
+            request["output_name"] = cadence_name(context["source_name"], variant=directory.name[-8:])
             context["import_mode"] = mode
             if target:
                 context["target"] = target
@@ -1073,6 +1083,7 @@ class Application:
             self.context_change(self.placement, "set_selected", 1 if context.get("import_mode", "above") == "above" else 0)
             self.job.set_text(path)
             self.opened_job = Path(path)
+            self.context_change(self.exposure_location, "set_selected", 0 if context.get("exposure_location", "fusion") == "color" else 1)
             import_file = self.opened_job / "resolve_import.json"
             if import_file.exists():
                 imported = json.loads(import_file.read_text(encoding="utf-8"))
@@ -1234,6 +1245,7 @@ class Application:
             widget.set_editable(not busy and not self.resume_job)
         self.backend.set_sensitive(not busy and not self.resume_job)
         self.exposure_mode.set_sensitive(not busy and not self.resume_job and not self.opened_job)
+        self.exposure_location.set_sensitive(not busy and not self.resume_job and not self.opened_job)
         self.source_fps_mode.set_sensitive(not busy and not self.resume_job)
         self.interpolation.set_sensitive(not busy and not self.resume_job)
         self.format.set_sensitive(not busy and not self.resume_job)

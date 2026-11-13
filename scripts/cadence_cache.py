@@ -126,12 +126,6 @@ def candidates(root, project_id, used_paths, media, timeline_id=None, approved_p
                     continue
                 if timeline_id is not None and marker.get("timeline_id") != timeline_id:
                     continue
-                # API хоста не показывает произвольные OFX file parameters: карту могли
-                # привязать к другой копии клипа. Такие задания автоматически не удаляем.
-                result_file = directory / "result.ini"
-                if result_file.is_file() and any(line.strip() == "exposure_mode=ofx"
-                                                for line in result_file.read_text(encoding="utf-8").splitlines()):
-                    continue
                 if any(beneath(path, directory) for path in used_paths):
                     continue
                 linked = [item for item in media if beneath(item["path"], directory)]

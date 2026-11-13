@@ -114,6 +114,27 @@ class CrankExposureImport(unittest.TestCase):
         self.assertEqual(outcome["exposure_status"], "configured_fusion")
         self.item.AddEffect.assert_not_called()
 
+    def test_color_route_does_not_create_fusion_or_direct_ofx(self):
+        self.result["clip_name"] = "Damy_na_skachkah_2_cadence_a84y7i6z"
+        configured = {"exposure_status": "configured_color", "exposure_effect_enabled": True}
+        with patch.object(bridge, "configure_color_exposure", return_value=configured) as color, \
+                patch.object(bridge, "configure_fusion_exposure") as fusion:
+            outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve, location="color", fresh=True)
+        self.assertEqual(outcome["exposure_status"], "configured_color")
+        self.assertTrue(color.call_args.kwargs["fresh"])
+        self.assertEqual(color.call_args.kwargs["clip_name"], self.result["clip_name"])
+        self.assertEqual(color.call_args.args[1], str(self.path))
+        fusion.assert_not_called()
+        self.item.AddEffect.assert_not_called()
+
+    def test_rejected_color_preset_does_not_fall_back_to_double_exposure(self):
+        with patch.object(bridge, "configure_color_exposure", side_effect=ValueError("unsupported DRX")), \
+                patch.object(bridge, "configure_fusion_exposure") as fusion:
+            outcome = bridge.attach_crank_exposure(self.project, self.result, self.outcome, self.resolve, location="color", fresh=True)
+        self.assertEqual(outcome["exposure_status"], "manual_color")
+        fusion.assert_not_called()
+        self.item.AddEffect.assert_not_called()
+
 
 class LocalModuleDiscovery(unittest.TestCase):
     """Resolve sibling modules even when the host interpreter omits the script directory."""
@@ -201,7 +222,7 @@ class ImportIsolation(unittest.TestCase):
         with (self.directory / "result.ini").open("a", encoding="utf-8") as out:
             out.write(f"exposure_mode=ofx\nexposure_map_path={path}\n")
         states = iter(("manual_map_required", "configured_fusion"))
-        def attach(project, result, outcome, resolve):
+        def attach(project, result, outcome, resolve, **kwargs):
             return dict(outcome, exposure_status=next(states))
         with patch.object(bridge, "attach_crank_exposure", side_effect=attach) as bind:
             self.run_import()
@@ -210,6 +231,22 @@ class ImportIsolation(unittest.TestCase):
         self.assertEqual(bind.call_count, 2)
         self.pool.ImportMedia.assert_called_once()
         self.pool.AppendToTimeline.assert_called_once()
+
+    def test_new_color_job_uses_fresh_result_and_does_not_apply_twice(self):
+        context = dict(self.context, exposure_location="color")
+        (self.directory / "app_context.json").write_text(json.dumps(context), encoding="utf-8")
+        path = self.directory / "exposure.sfexposure"
+        path.touch()
+        with (self.directory / "result.ini").open("a", encoding="utf-8") as out:
+            out.write(f"exposure_mode=ofx\nexposure_map_path={path}\n")
+        def attach(project, result, outcome, resolve, **kwargs):
+            return dict(outcome, exposure_status="configured_color")
+        with patch.object(bridge, "attach_crank_exposure", side_effect=attach) as bind:
+            self.run_import()
+            self.run_import()
+        bind.assert_called_once()
+        self.assertEqual(bind.call_args.kwargs, {"location": "color", "fresh": True})
+        self.pool.ImportMedia.assert_called_once()
 
     def test_movie_import_uses_simple_path(self):
         """Use the path form already exercised by the legacy MOV import."""
@@ -253,6 +290,16 @@ class ImportIsolation(unittest.TestCase):
         self.assertTrue(name.endswith("_cadence"))
         self.assertLessEqual(len(name.encode("utf-8")), 198)
         self.assertFalse(any(character in name for character in "/\\%?"))
+
+    def test_cadence_variants_have_distinct_names_and_retain_full_job_suffix(self):
+        for variant in ("a84y7i6z", "_0w5co8_", "1234abcd"):
+            self.assertEqual(bridge.cadence_name("Damy_na_skachkah_2.mp4", variant),
+                             "Damy_na_skachkah_2_cadence_" + variant)
+        self.assertNotEqual(bridge.cadence_name("Scene.mp4", "1234abcd"),
+                            bridge.cadence_name("Scene.mp4", "abcd1234"))
+        for variant in ("../other", "short", "abcd/xyz"):
+            with self.assertRaises(RuntimeError):
+                bridge.cadence_name("Scene.mp4", variant)
 
 
 class TimelineSelection(unittest.TestCase):
@@ -898,7 +945,7 @@ class SavedJobUiState(unittest.TestCase):
             app_spec.loader.exec_module(app_module)
         app = app_module.Application.__new__(app_module.Application)
         app.running_job = app.future = None
-        for name in ("placement", "job", "timeline_label", "status", "numeric_request", "choose_path", "import_status"):
+        for name in ("placement", "job", "timeline_label", "status", "numeric_request", "choose_path", "import_status", "exposure_location"):
             setattr(app, name, Mock())
         app.values = {}
         with tempfile.TemporaryDirectory() as folder:

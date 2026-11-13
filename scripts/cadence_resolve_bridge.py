@@ -21,6 +21,7 @@ if _BRIDGE_DIRECTORY not in sys.path:
     sys.path.insert(0, _BRIDGE_DIRECTORY)
 
 from cadence_exposure import FusionExposureError, configure_fusion_exposure
+from cadence_color_preset import configure_color_exposure
 
 
 def check(value, message):
@@ -51,7 +52,7 @@ def host_fps(fps):
     return f"{fps:g}"
 
 
-def cadence_name(source_name):
+def cadence_name(source_name, variant=None):
     """Build a portable Unicode basename from a clip label while retaining its identity."""
     name = str(source_name).strip()
     if Path(name).suffix.lower() in (".mov", ".mp4", ".mkv", ".mxf", ".avi", ".webm", ".m4v", ".mts", ".m2ts", ".tif", ".tiff"):
@@ -60,7 +61,9 @@ def cadence_name(source_name):
     if name.endswith("_cadence"):
         name = name[:-8]
     name = name.encode("utf-8")[:190].decode("utf-8", errors="ignore").rstrip(". ") or "clip"
-    return name + "_cadence"
+    if variant is not None:
+        check(isinstance(variant, str) and re.fullmatch(r"[a-z0-9_]{8}", variant), "Некорректный ID варианта Cadence")
+    return name + "_cadence" + ("_" + variant if variant is not None else "")
 
 
 def read_ini(path):
@@ -967,7 +970,7 @@ def save_exposure_diagnostics(path, diagnostics):
         print("[SilentFilm Cadence] Не записана диагностика привязки экспозиции: " + str(error), file=sys.stderr)
 
 
-def attach_crank_exposure(project, result, outcome, resolve=None):
+def attach_crank_exposure(project, result, outcome, resolve=None, location="fusion", fresh=False):
     """Prefer a verified Fusion binding; preserve a disabled direct OFX as a compatibility fallback."""
     if result.get("exposure_mode", "bake") != "ofx":
         return outcome
@@ -991,6 +994,26 @@ def attach_crank_exposure(project, result, outcome, resolve=None):
             if item:
                 break
         check(item, "Resolve не вернул добавленный монтажный клип для OFX")
+        check(location in ("color", "fusion"), "Неизвестное расположение Crank Exposure")
+        outcome["exposure_location"] = location
+        if location == "color":
+            try:
+                configured = configure_color_exposure(item, path, diagnostics, fresh=fresh,
+                                                       clip_name=result.get("clip_name"))
+            except Exception as error:
+                outcome.update(exposure_status="manual_color", exposure_effect_enabled=None)
+                outcome["message"] += " Автонастройка Color не завершена: " + str(error) + ". "
+                if diagnostics.get("preset"):
+                    outcome["exposure_color_preset"] = diagnostics["preset"]
+                    outcome["message"] += "Пресет результата сохранён: " + diagnostics["preset"] + ". "
+                outcome["message"] += "Fusion не добавлен. Карта: " + path
+                diagnostics["error"] = str(error)
+            else:
+                outcome.update(configured)
+                outcome["message"] += " SilentFilm Crank Exposure настроен в Color через пресет этого клипа. Открой Color для регулировки Blend."
+            diagnostics["status"] = outcome["exposure_status"]
+            save_exposure_diagnostics(path, diagnostics)
+            return outcome
         if outcome.get("exposure_ofx_id"):
             for previous in sequence(item.GetEffects("ofx")):
                 info = previous.GetInfo()
@@ -1067,6 +1090,8 @@ def import_result(project, request, resolve=None):
         check(Path(result.get("exposure_map_path", "")).is_file(), "Карта экспозиции отсутствует; импорт OFX-результата остановлен")
     context_file = directory / "app_context.json"
     context = json.loads(context_file.read_text(encoding="utf-8")) if context_file.exists() else {}
+    exposure_location = context.get("exposure_location", "fusion")
+    check(exposure_location in ("color", "fusion"), "Неизвестное расположение экспозиции в задании")
     current = project_context(project)
     check(not context.get("project_id") or context["project_id"] == current["project_id"],
           "Открой исходный проект: " + context.get("project_name", ""))
@@ -1077,9 +1102,9 @@ def import_result(project, request, resolve=None):
             for index in range(1, int(project.GetTimelineCount()) + 1):
                 timeline = project.GetTimelineByIndex(index)
                 if timeline.GetUniqueId() == previous.get("timeline_id"):
-                    if result.get("exposure_mode") == "ofx" and previous.get("exposure_status") != "configured_fusion":
+                    if result.get("exposure_mode") == "ofx" and previous.get("exposure_status") not in ("configured_fusion", "configured_color"):
                         previous["message"] = "Результат уже в монтаже: " + timeline.GetName() + "."
-                        previous = attach_crank_exposure(project, result, previous, resolve)
+                        previous = attach_crank_exposure(project, result, previous, resolve, location=exposure_location)
                         atomic_json(marker, previous)
                         return previous
                     return dict(previous, message="Уже импортировано: " + timeline.GetName() + ". " + previous.get("message", ""))
@@ -1123,7 +1148,7 @@ def import_result(project, request, resolve=None):
     if mode in ("replace", "above"):
         operation = replace_result if mode == "replace" else add_above_result
         outcome = operation(project, pool, clip, context["target"], count, fps, directory)
-        outcome = attach_crank_exposure(project, result, outcome, resolve)
+        outcome = attach_crank_exposure(project, result, outcome, resolve, location=exposure_location, fresh=True)
         temporary = marker.with_suffix(".tmp")
         temporary.write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
         temporary.replace(marker)
@@ -1154,7 +1179,7 @@ def import_result(project, request, resolve=None):
         raise
     outcome = {"project_id": current["project_id"], "timeline_id": timeline.GetUniqueId(), "timeline": name, "item_id": added[0].GetUniqueId(),
                "message": f"Импортировано {count} кадров, {count / fps:.3f} с при {fps:g} fps. Далее добавь Camera Optics → Negative → Print → Projector."}
-    outcome = attach_crank_exposure(project, result, outcome, resolve)
+    outcome = attach_crank_exposure(project, result, outcome, resolve, location=exposure_location, fresh=True)
     temporary = marker.with_suffix(".tmp")
     temporary.write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
     temporary.replace(marker)

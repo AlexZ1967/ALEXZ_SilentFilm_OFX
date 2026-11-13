@@ -502,7 +502,8 @@ OfxStatus describe(OfxImageEffectHandle effect, EffectKind kind)
         (kind == EffectKind::Probe || kind == EffectKind::Camera) && temporalAccess ? 1 : 0), "temporal capability");
 #ifdef SILENTFILM_ENABLE_CUDA
     if (kind == EffectKind::Probe || kind == EffectKind::Camera || kind == EffectKind::CameraOptics || kind == EffectKind::Projector
-        || kind == EffectKind::Negative || kind == EffectKind::Print || kind == EffectKind::Defects) {
+        || kind == EffectKind::Negative || kind == EffectKind::Print || kind == EffectKind::Defects
+        || kind == EffectKind::CrankExposure) {
         optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaRenderSupported, 0, "true"), "CUDA capability");
         optionalProperty(properties->propSetString(props, kOfxImageEffectPropCudaStreamSupported, 0, "true"), "CUDA stream capability");
     }
@@ -1661,7 +1662,7 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 28, setHost, entry<EffectKind::CrankExposure>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 29, setHost, entry<EffectKind::CrankExposure>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 6, setHost, entry<EffectKind::Probe>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 25, setHost, entry<EffectKind::Camera>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 25, setHost, entry<EffectKind::Negative>},

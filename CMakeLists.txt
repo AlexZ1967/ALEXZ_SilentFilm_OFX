@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ALEXZSilentFilmOFX VERSION 0.28.0 LANGUAGES CXX)
+project(ALEXZSilentFilmOFX VERSION 0.29.0 LANGUAGES CXX)
 
 option(SILENTFILM_ENABLE_CUDA "Собрать CUDA backend и тест сравнения CPU/CUDA" OFF)
 option(SILENTFILM_BUILD_CADENCE "Собрать нативный каденс и launcher отдельного окна (Linux)" ON)
@@ -229,6 +229,9 @@ if(BUILD_TESTING)
         endif()
         find_program(SILENTFILM_TEST_PYTHON python3 PATHS /usr/bin NO_DEFAULT_PATH)
         if(SILENTFILM_TEST_PYTHON)
+            add_test(NAME silentfilm_cadence_color_preset COMMAND "${SILENTFILM_TEST_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/cadence_color_preset_tests.py")
+            set_tests_properties(silentfilm_cadence_color_preset PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
             add_test(NAME silentfilm_cadence_exposure_binding COMMAND "${SILENTFILM_TEST_PYTHON}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/cadence_exposure_tests.py")
             set_tests_properties(silentfilm_cadence_exposure_binding PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")

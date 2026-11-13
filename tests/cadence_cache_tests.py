@@ -34,13 +34,28 @@ class CacheFixture(unittest.TestCase):
 class ManagedStorage(CacheFixture):
     """Protect project boundaries and active or referenced generations."""
 
-    def test_ofx_exposure_map_is_preserved_without_visible_media_usage(self):
+    def test_unused_ofx_result_removes_its_map_and_preset_with_whole_generation(self):
         directory = self.job()
         (directory / "result.ini").write_text("exposure_mode=ofx\n", encoding="utf-8")
         (directory / "exposure.sfexposure").write_text("map", encoding="utf-8")
+        (directory / "crank_exposure.drx").write_text("clip preset", encoding="utf-8")
+        entries = self.candidates()
+        self.assertEqual([entry["path"] for entry in entries], [str(directory)])
+        size = sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+        self.assertEqual(entries[0]["bytes"], size)
+        cache.remove_generation(entries[0])
+        self.assertFalse(directory.exists())
         self.assertEqual(self.candidates(), [])
-        (directory / "result.ini").write_text("exposure_mode=bake\n", encoding="utf-8")
-        self.assertEqual([entry["path"] for entry in self.candidates()], [str(directory)])
+
+    def test_ofx_result_is_preserved_while_used_or_usage_is_unknown(self):
+        directory = self.job()
+        (directory / "result.ini").write_text("exposure_mode=ofx\n", encoding="utf-8")
+        (directory / "exposure.sfexposure").write_text("map", encoding="utf-8")
+        clip = str(directory / "Scene_01_cadence.mov")
+        self.assertEqual(self.candidates(used=[clip]), [])
+        for usage in (None, 1):
+            self.assertEqual(self.candidates(media=[{"path": clip, "usage": usage}]), [])
+        self.assertTrue((directory / "exposure.sfexposure").is_file())
 
     def test_active_frame_provider_blocks_cleanup_after_native_error(self):
         directory = self.job(state="error")
@@ -153,6 +168,31 @@ class HostCleanup(CacheFixture):
         self.assertEqual(result["deleted"], [])
         self.assertEqual(result["skipped"], 1)
         self.assertTrue(self.directory.exists())
+        self.pool.DeleteClips.assert_not_called()
+
+    def test_ofx_cleanup_removes_pool_entry_and_all_clip_artifacts(self):
+        (self.directory / "result.ini").write_text("exposure_mode=ofx\n", encoding="utf-8")
+        (self.directory / "exposure.sfexposure").write_text("map", encoding="utf-8")
+        (self.directory / "crank_exposure.drx").write_text("preset", encoding="utf-8")
+        result = self.clean(self.plan()["entries"])
+        self.assertEqual(result["deleted"], [str(self.directory)])
+        self.assertEqual(result["errors"], [])
+        self.pool.DeleteClips.assert_called_once_with([self.clip])
+        self.assertFalse(self.directory.exists())
+
+    def test_ofx_map_survives_new_reference_on_another_timeline(self):
+        (self.directory / "result.ini").write_text("exposure_mode=ofx\n", encoding="utf-8")
+        exposure = self.directory / "exposure.sfexposure"
+        exposure.write_text("map", encoding="utf-8")
+        plan = self.plan()
+        self.assertEqual(len(plan["entries"]), 1)
+        item = Mock()
+        item.GetMediaPoolItem.return_value = self.clip
+        self.timelines[1].GetItemListInTrack.return_value = [item]
+        result = self.clean(plan["entries"])
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(exposure.read_text(encoding="utf-8"), "map")
         self.pool.DeleteClips.assert_not_called()
 
     def test_pool_delete_failure_preserves_physical_files(self):
