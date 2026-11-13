@@ -2,6 +2,7 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-14 — опубликована Defects0.36:** [f004fc4](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/f004fc4), main; push подтверждён Git.
 - [x] ✅ **2026-11-14 — подготовлен следующий блок Defects0.36:** bicubic development mottling/streaks/mixed, fog, coherent time, CPU/GPU coarse grids и совместимость старых пресетов. **Проверки пока не выполнялись.** [Инструкция](DEFECTS_DEVELOPMENT_0.36.md).
 - [x] ✅ **2026-11-14 — пользователь подтвердил все предложенные тесты0.36 и ручную работу новой проявки.** Полных логов/численных ошибок/замеров скорости нет; агент проверки не запускал. Следующий этап — surface mixed/hair и Projector Gate softness.
 - [x] ✅ **2026-11-14 — опубликована0.35:** [4179a1d](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/4179a1d), main; push подтверждён Git.
