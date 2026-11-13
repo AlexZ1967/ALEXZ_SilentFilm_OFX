@@ -51,11 +51,15 @@ inline std::vector<ReferencePreset> referencePresets(ReferenceStage stage)
     const auto defect = [](const char* label, int node, int material, int pattern, double strength, double size,
                            double amount, int persistence, int seed) {
         return ReferencePreset{label, node, {{"material", static_cast<double>(material), true}, {"pattern", static_cast<double>(pattern), true},
-            {"strength", strength}, {"blend", 1}, {"mix_response", 0, true}, {"size", size}, {"amount", amount}, {"persistence", static_cast<double>(persistence), true},
+            {"strength", strength}, {"blend", 1}, {"mix_response", pattern == 3 ? 0.0 : 1.0, true},
+            {"damage_type", pattern == 3 ? 0.0 : node == 16 || node == 28 || node == 39 ? 3.0
+                : node == 19 || node == 32 || node == 40 ? 2.0 : 1.0, true},
+            {"irregularity", node == 14 ? 1.0 : node == 28 ? 0.5 : 0.6},
+            {"size", size}, {"amount", amount}, {"persistence", static_cast<double>(persistence), true},
             {"seed", static_cast<double>(seed), true}, {"encoding", static_cast<double>(color::pipelineTransfer), true},
             {"size_spread", 35}, {"thickness_spread", 35},
             {"edge_bias", node == 14 || node == 19 ? 0.7 : node == 17 ? 0.35 : node == 20 ? 0.5 : node == 28 ? 1.0 : 0.0},
-            {"scratch_wander", node == 19 ? 9.216 : node == 28 ? 7.68 : 0.0}, {"scratch_wander_time", pattern == 1 ? 1.0 : 8.0},
+            {"scratch_wander", 0}, {"scratch_wander_time", pattern == 1 ? 1.0 : 8.0},
             {"amount_variation", 0}, {"amount_drift_time", 48}}};
     };
     return {defect("n14 Capture dirt (mapped)", 14, 0, 0, 0, 0.2, 10, 48, 1925),

@@ -63,14 +63,21 @@ def check_presets(args):
         node = nodes[preset["node"]]; widgets = node["widgets_values"]; values = preset["values"]
         development = node["type"].endswith("Development")
         damage = node["type"].endswith("Damage")
-        expected = {"strength": widgets[0], "blend": 1, "mix_response": 0, "encoding": 1, "size": widgets[2 if development else 4 if damage else 3],
+        expected = {"strength": widgets[0], "blend": 1, "mix_response": 0 if development else 1, "encoding": 1, "size": widgets[2 if development else 4 if damage else 3],
                     "persistence": widgets[4 if development else 5 if damage else 4], "seed": node["linked_seeds"]["seed"]}
         if not development:
             expected["amount"] = widgets[3 if damage else 2]
             expected["edge_bias"] = widgets[7 if damage else 6]
+        if development:
+            expected["damage_type"] = 0
+        elif damage:
+            expected["damage_type"] = {"surface": 1, "emulsion_loss": 2, "dirty": 3}[widgets[2]]
+        else:
+            expected["damage_type"] = 1
+        expected["irregularity"] = widgets[5 if development else 6 if damage else 5]
         expected.update(size_spread=35, thickness_spread=35, amount_variation=0, amount_drift_time=48)
         scratches = widgets[1] == "scratches"
-        expected["scratch_wander"] = 1920 * 0.008 * widgets[6 if damage else 5] if scratches else 0
+        expected["scratch_wander"] = 0
         expected["scratch_wander_time"] = 1 if scratches else 8
         for key, value in expected.items():
             if not math.isclose(values[key], value, abs_tol=1e-9):

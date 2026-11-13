@@ -7,6 +7,7 @@
 #include "silentfilm/defects_pixel.hpp"
 #include "silentfilm/color_contract.hpp"
 #include "silentfilm/crank_exposure.hpp"
+#include "silentfilm/user_presets.hpp"
 
 #include <ofxImageEffect.h>
 #include <ofxGPURender.h>
@@ -24,7 +25,10 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <map>
 #include <new>
+#include <set>
+#include <string>
 #include <stdexcept>
 
 namespace {
@@ -133,10 +137,15 @@ struct Instance {
     OfxParamHandle defectMaterial = nullptr, defectPattern = nullptr, defectStrength = nullptr, defectSize = nullptr;
     OfxParamHandle defectBlend = nullptr;
     OfxParamHandle defectMixResponse = nullptr;
+    OfxParamHandle defectDamage = nullptr, defectIrregularity = nullptr;
     OfxParamHandle defectAmount = nullptr, defectPersistence = nullptr, defectSeed = nullptr;
     OfxParamHandle defectSizeSpread = nullptr, defectThicknessSpread = nullptr, defectEdgeBias = nullptr;
     OfxParamHandle defectScratchWander = nullptr, defectScratchWanderTime = nullptr;
     OfxParamHandle defectAmountVariation = nullptr, defectAmountDriftTime = nullptr;
+    OfxParamHandle userPresetName = nullptr, userPresetFile = nullptr, userPresetCatalog = nullptr, userPresetStatus = nullptr;
+    OfxParamHandle userPresetChoice = nullptr;
+    std::vector<std::string> userPresetNames;
+    bool editingUserPreset = false;
 };
 
 /** Fetch instance state without storing image handles across render actions. */
@@ -596,6 +605,69 @@ silentfilm::ReferenceStage referenceStage(EffectKind kind)
     }
 }
 
+/** Define a per-effect personal preset library independently of the reference table. */
+void defineUserPresetControls(OfxParamSetHandle set, OfxPropertySetHandle page)
+{
+    OfxPropertySetHandle props = nullptr;
+    require(parameters->paramDefine(set, kOfxParamTypeGroup, "user_presets", &props), "define user preset group");
+    require(properties->propSetString(props, kOfxPropLabel, 0, "My Presets"), "user preset group label");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropGroupOpen, 0, 0), "user preset group closed");
+    for (const auto* id : {"user_preset_name", "user_preset_catalog", "user_preset_status"}) {
+        require(parameters->paramDefine(set, kOfxParamTypeString, id, &props), "define user preset text");
+        require(properties->propSetString(props, kOfxParamPropParent, 0, "user_presets"), "user preset text parent");
+        require(properties->propSetString(props, kOfxPropLabel, 0,
+            std::strcmp(id, "user_preset_name") == 0 ? "Preset Name"
+                : std::strcmp(id, "user_preset_catalog") == 0 ? "Available Presets" : "Preset Status"), "user preset text label");
+        require(properties->propSetString(props, kOfxParamPropDefault, 0, ""), "user preset text default");
+        optionalProperty(properties->propSetInt(props, kOfxParamPropAnimates, 0, 0), "user preset text animation");
+        optionalProperty(properties->propSetInt(props, kOfxParamPropEvaluateOnChange, 0, 0), "user preset text no render");
+        if (std::strcmp(id, "user_preset_name") != 0) {
+            if (std::strcmp(id, "user_preset_catalog") == 0) {
+                optionalProperty(properties->propSetString(props, kOfxParamPropStringMode, 0, kOfxParamStringIsMultiLine), "user preset catalog multiline");
+                optionalProperty(properties->propSetInt(props, kOfxParamPropSecret, 0, 1), "legacy preset catalog hidden");
+            }
+            optionalProperty(properties->propSetInt(props, kOfxParamPropEnabled, 0, 0), "user preset status readonly");
+            optionalProperty(properties->propSetInt(props, kOfxParamPropPersistant, 0, 0), "user preset status transient");
+            optionalProperty(properties->propSetInt(props, kOfxParamPropCanUndo, 0, 0), "user preset status no undo");
+        } else optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0,
+            "Имя собственного пресета, можно по-русски. Save / Overwrite сохраняет все настройки этой ноды на текущем кадре; одноимённый пресет заменяется. Кривые анимации не сохраняются. У Crank Exposure сохраняется только Blend: карта и Frame Offset относятся к клипу."), "user preset name hint");
+    }
+    require(parameters->paramDefine(set, kOfxParamTypeChoice, "user_preset", &props), "define user preset choice");
+    require(properties->propSetString(props, kOfxParamPropParent, 0, "user_presets"), "user preset choice parent");
+    require(properties->propSetString(props, kOfxPropLabel, 0, "Saved Presets"), "user preset choice label");
+    require(properties->propSetString(props, kOfxParamPropChoiceOption, 0, "—"), "user preset empty option");
+    require(properties->propSetInt(props, kOfxParamPropDefault, 0, 0), "user preset choice default");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropAnimates, 0, 0), "user preset choice animation");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropPersistant, 0, 0), "user preset selection transient");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropEvaluateOnChange, 0, 0), "user preset selection no render");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropCanUndo, 0, 0), "user preset selection no undo");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropSecret, 0, 0), "user preset choice visible");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropEnabled, 0, 1), "user preset choice enabled");
+    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0,
+        "Нажми Refresh My Presets, чтобы прочитать библиотеку. Выбор варианта назначает имя и путь; нажми Apply My Preset для применения. Save обновляет список. Нейтральный пункт — ничего не выбирает."), "user preset choice hint");
+    require(parameters->paramDefine(set, kOfxParamTypeString, "user_preset_file", &props), "define preset file");
+    require(properties->propSetString(props, kOfxParamPropParent, 0, "user_presets"), "preset file parent");
+    require(properties->propSetString(props, kOfxPropLabel, 0, "Preset File"), "preset file label");
+    require(properties->propSetString(props, kOfxParamPropDefault, 0, ""), "preset file default");
+    require(properties->propSetString(props, kOfxParamPropStringMode, 0, kOfxParamStringIsFilePath), "preset file picker");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropAnimates, 0, 0), "preset file animation");
+    optionalProperty(properties->propSetInt(props, kOfxParamPropEvaluateOnChange, 0, 0), "preset file no render");
+    optionalProperty(properties->propSetString(props, kOfxParamPropHint, 0,
+        "Выбери сохранённый .sfpreset стандартной кнопкой обзора, затем нажми Apply My Preset. Выбор файла сам не меняет изображение. Save сохраняет в пользовательскую библиотеку под Preset Name и заполняет путь. Также можно ввести имя библиотечного пресета вручную без выбора файла."), "preset file hint");
+    const char* ids[] = {"save_user_preset", "apply_user_preset", "refresh_user_presets"};
+    const char* labels[] = {"Save / Overwrite My Preset", "Apply My Preset", "Refresh My Presets"};
+    for (int i = 0; i < 3; ++i) {
+        require(parameters->paramDefine(set, kOfxParamTypePushButton, ids[i], &props), "define user preset button");
+        require(properties->propSetString(props, kOfxParamPropParent, 0, "user_presets"), "user preset button parent");
+        require(properties->propSetString(props, kOfxPropLabel, 0, labels[i]), "user preset button label");
+        optionalProperty(properties->propSetInt(props, kOfxParamPropEvaluateOnChange, 0, 0), "user preset button no render");
+    }
+    int count = 0;
+    require(properties->propGetDimension(page, kOfxParamPropPageChild, &count), "user preset page dimension");
+    for (const char* id : {"user_preset", "user_preset_name", "user_preset_file", "save_user_preset", "apply_user_preset", "refresh_user_presets", "user_preset_status"})
+        require(properties->propSetString(page, kOfxParamPropPageChild, count++, id), "user preset page child");
+}
+
 /** Append user-triggered reference presets without changing existing project values on load. */
 void defineReferenceControls(OfxParamSetHandle set, OfxPropertySetHandle page, EffectKind kind)
 {
@@ -609,7 +681,7 @@ void defineReferenceControls(OfxParamSetHandle set, OfxPropertySetHandle page, E
         require(properties->propSetString(choice, kOfxParamPropChoiceOption, static_cast<int>(i), presets[i].label), "reference preset option");
     optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
         kind == EffectKind::Defects
-            ? "Доступные параметры отдельных нод with_defects. Mapped означает частичный перенос: тип повреждения, мягкость и движение ещё не эквивалентны Comfy. Для точного сравнения зерна сначала отключи Defects."
+            ? "Параметры отдельных нод with_defects. Поверхностные пресеты включают Comfy Damage Model и Physical material. Development, mixed/hair, softness окна и RNG ещё не полностью перенесены; mapped не означает полное совпадение цепочки. Собственные варианты сохраняй в My Presets."
             : "Настройки из Видео-в-Хронику-по-этапам_with_defects.json. Выбор списка сам по себе ничего не меняет: нажми Apply Reference Preset. Для чистого A/B используй новую ноду без анимации. Print в workflow имеет grain_strength=0; Grain only включает собственное зерно позитива отдельно."), "reference preset hint");
     require(parameters->paramDefine(set, kOfxParamTypePushButton, "apply_reference_preset", &button), "define apply reference preset");
     require(properties->propSetString(button, kOfxPropLabel, 0, "Apply Reference Preset"), "apply reference label");
@@ -617,6 +689,241 @@ void defineReferenceControls(OfxParamSetHandle set, OfxPropertySetHandle page, E
     require(properties->propGetDimension(page, kOfxParamPropPageChild, &children), "reference page dimension");
     require(properties->propSetString(page, kOfxParamPropPageChild, children, "reference_preset"), "reference page choice");
     require(properties->propSetString(page, kOfxParamPropPageChild, children + 1, "apply_reference_preset"), "reference page button");
+    defineUserPresetControls(set, page);
+}
+
+/** Scope synchronous host notifications to one preset edit. Never used by render. */
+struct UserPresetEdit {
+    bool& flag;
+    explicit UserPresetEdit(bool& value) : flag(value) { flag = true; }
+    ~UserPresetEdit() { flag = false; }
+};
+
+std::string presetEffectKey(EffectKind kind)
+{
+    switch (kind) {
+    case EffectKind::Camera: return "com.alexz.silentfilm.camera";
+    case EffectKind::CameraOptics: return "com.alexz.silentfilm.cameraoptics";
+    case EffectKind::Negative: return "com.alexz.silentfilm.negative";
+    case EffectKind::Print: return "com.alexz.silentfilm.print";
+    case EffectKind::Projector: return "com.alexz.silentfilm.projector";
+    case EffectKind::Defects: return "com.alexz.silentfilm.defects";
+    case EffectKind::CrankExposure: return "com.alexz.silentfilm.crankexposure";
+    default: throw Failure(kOfxStatErrUnsupported, "User presets are not available for Host Probe");
+    }
+}
+
+/** Snapshot every artistic scalar control, excluding UI actions and clip-specific bindings. */
+std::vector<silentfilm::UserPresetValue> userPresetParameters(EffectKind kind)
+{
+    if (kind == EffectKind::CrankExposure) return {{"blend", false, 0}};
+    std::map<std::string, bool> ids;
+    for (const auto& preset : silentfilm::referencePresets(referenceStage(kind)))
+        for (const auto& value : preset.values) {
+            const auto inserted = ids.emplace(value.id, value.integer);
+            if (!inserted.second && inserted.first->second != value.integer)
+                throw Failure(kOfxStatErrValue, "Inconsistent user preset parameter schema");
+        }
+    std::vector<silentfilm::UserPresetValue> result;
+    for (const auto& pair : ids) result.push_back({pair.first, pair.second, 0});
+    return result;
+}
+
+void userPresetStatus(Instance& state, const std::string& text) noexcept
+{
+    if (state.userPresetStatus && parameters->paramSetValue(state.userPresetStatus, text.c_str()) != kOfxStatOK)
+        std::fprintf(stderr, "[ALEXZSilentFilmOFX] user preset status: %s\n", text.c_str());
+}
+
+/** Refresh a nonempty selectable library on a UI action; never reset ChoiceOption. */
+void refreshUserPresets(Instance& state, const std::string& root)
+{
+    auto names = silentfilm::listUserPresets(root, presetEffectKey(state.kind));
+    OfxPropertySetHandle props = nullptr;
+    require(parameters->paramGetPropertySet(state.userPresetChoice, &props), "preset list properties");
+    if (!props || !properties->propSetStringN) throw Failure(kOfxStatErrUnsupported, "Хост не поддерживает список; выбери Preset File");
+    int previousCount = 1;
+    require(properties->propGetDimension(props, kOfxParamPropChoiceOption, &previousCount), "preset list dimension");
+    std::vector<const char*> labels(std::max(names.size() + 1, static_cast<std::size_t>(std::max(1, previousCount))), "—");
+    for (std::size_t i = 0; i < names.size(); ++i) labels[i + 1] = names[i].c_str();
+    require(parameters->paramSetValue(state.userPresetChoice, 0), "reset preset list selection");
+    state.userPresetNames.clear();
+    require(properties->propSetStringN(props, kOfxParamPropChoiceOption, static_cast<int>(labels.size()), labels.data()), "publish preset list");
+    state.userPresetNames = std::move(names);
+    std::string catalog;
+    for (const auto& name : state.userPresetNames) {
+        if (!catalog.empty()) catalog += "\n";
+        catalog += name;
+    }
+    if (catalog.empty()) catalog = "В библиотеке пока нет пресетов";
+    require(parameters->paramSetValue(state.userPresetCatalog, catalog.c_str()), "user preset catalog text");
+}
+
+struct UserPresetTarget {
+    OfxParamHandle handle = nullptr;
+    bool integer = false;
+    double minimum = 0, maximum = 0;
+    silentfilm::UserPresetValue oldValue;
+};
+
+/** Read types, ranges and values before any mutation, keeping the storage module host-independent. */
+UserPresetTarget userPresetTarget(OfxParamSetHandle set, const silentfilm::UserPresetValue& schema, double time, bool applying)
+{
+    UserPresetTarget target;
+    const auto& id = schema.id;
+    target.integer = schema.integer;
+    require(parameters->paramGetHandle(set, id.c_str(), &target.handle, nullptr), "user preset parameter handle");
+    // Тип известен из нашего descriptor/preset schema. Save использует те же
+    // типизированные getters, что render, без обращения к host property metadata.
+    if (applying) {
+        OfxPropertySetHandle props = nullptr;
+        if (!parameters->paramGetPropertySet) throw Failure(kOfxStatErrUnsupported, "Host parameter properties are unavailable");
+        require(parameters->paramGetPropertySet(target.handle, &props), "preset target properties");
+        if (!props) throw Failure(kOfxStatErrBadHandle, "Host returned empty preset parameter properties");
+        const bool choice = id == "encoding" || id == "playback_mode" || id == "material" || id == "pattern"
+            || id == "mix_response" || id == "damage_type";
+        const bool boolean = id == "preview_positive";
+        if (choice || boolean) {
+            int count = 2;
+            if (choice) require(properties->propGetDimension(props, kOfxParamPropChoiceOption, &count), "preset choice range");
+            target.minimum = 0; target.maximum = count - 1;
+        } else if (target.integer) {
+            int low = 0, high = 0;
+            require(properties->propGetInt(props, kOfxParamPropMin, 0, &low), "preset integer minimum");
+            require(properties->propGetInt(props, kOfxParamPropMax, 0, &high), "preset integer maximum");
+            target.minimum = low; target.maximum = high;
+        } else {
+            require(properties->propGetDouble(props, kOfxParamPropMin, 0, &target.minimum), "preset double minimum");
+            require(properties->propGetDouble(props, kOfxParamPropMax, 0, &target.maximum), "preset double maximum");
+        }
+        int animates = 0;
+        require(properties->propGetInt(props, kOfxParamPropAnimates, 0, &animates), "preset parameter animation");
+        if (animates) {
+            unsigned int count = 0;
+            require(parameters->paramGetNumKeys(target.handle, &count), "preset target animation keys");
+            if (count) throw Failure(kOfxStatErrValue, "На ноде есть анимация. Примени пресет на новой ноде без ключей; кривые не изменены.");
+        }
+    }
+    double value = 0;
+    if (target.integer) {
+        int integer = 0;
+        require(parameters->paramGetValueAtTime(target.handle, time, &integer), "snapshot preset integer"); value = integer;
+    } else require(parameters->paramGetValueAtTime(target.handle, time, &value), "snapshot preset double");
+    target.oldValue = {id, target.integer, value};
+    return target;
+}
+
+/** Handle disk I/O only on explicit UI actions, with preflight and rollback on host setter failure. */
+OfxStatus userPresetChanged(OfxImageEffectHandle effect, Instance& state, const char* action, double time,
+    const std::string& libraryOverride = {})
+{
+    UserPresetEdit guard(state.editingUserPreset);
+    try {
+        std::fprintf(stderr, "[ALEXZSilentFilmOFX] preset begin effect=%s action=%s\n", effectName(state.kind), action);
+        std::fflush(stderr);
+        const auto libraryRoot = [&] { return libraryOverride.empty() ? silentfilm::userPresetRoot() : libraryOverride; };
+        if (std::strcmp(action, "refresh_user_presets") == 0) {
+            const auto root = libraryRoot();
+            refreshUserPresets(state, root);
+            userPresetStatus(state, "Каталог: " + root + "/" + presetEffectKey(state.kind));
+            return kOfxStatOK;
+        }
+        if (std::strcmp(action, "user_preset") == 0) {
+            int index = 0;
+            require(parameters->paramGetValue(state.userPresetChoice, &index), "selected preset list index");
+            if (index > 0 && static_cast<std::size_t>(index) <= state.userPresetNames.size()) {
+                const auto& selected = state.userPresetNames[static_cast<std::size_t>(index - 1)];
+                const auto file = silentfilm::userPresetPath(libraryRoot(), presetEffectKey(state.kind), selected);
+                require(parameters->paramSetValue(state.userPresetName, selected.c_str()), "selected library name");
+                require(parameters->paramSetValue(state.userPresetFile, file.c_str()), "selected library file");
+                userPresetStatus(state, "Выбран: " + selected + "; нажми Apply My Preset");
+            }
+            return kOfxStatOK;
+        }
+        if (std::strcmp(action, "user_preset_name") == 0) {
+            require(parameters->paramSetValue(state.userPresetFile, ""), "clear previous preset file");
+            return kOfxStatOK;
+        }
+        if (std::strcmp(action, "user_preset_file") == 0) {
+            char* value = nullptr;
+            require(parameters->paramGetValue(state.userPresetFile, &value), "selected preset file");
+            const std::string file(value ? value : "");
+            if (!file.empty()) {
+                const auto selected = silentfilm::userPresetFileName(file);
+                silentfilm::validateUserPresetName(selected);
+                require(parameters->paramSetValue(state.userPresetName, selected.c_str()), "selected preset name");
+                userPresetStatus(state, "Файл выбран; нажми Apply My Preset");
+            }
+            return kOfxStatOK;
+        }
+        char* text = nullptr;
+        require(parameters->paramGetValue(state.userPresetName, &text), "user preset name");
+        const std::string name = text ? text : "";
+        silentfilm::validateUserPresetName(name);
+        OfxParamSetHandle set = nullptr;
+        require(effects->getParamSet(effect, &set), "user preset set");
+        const bool saving = std::strcmp(action, "save_user_preset") == 0;
+        silentfilm::UserPreset snapshot{presetEffectKey(state.kind), name, {}};
+        std::vector<UserPresetTarget> targets;
+        for (const auto& schema : userPresetParameters(state.kind)) {
+            std::fprintf(stderr, "[ALEXZSilentFilmOFX] preset snapshot id=%s type=%s\n", schema.id.c_str(), schema.integer ? "int" : "double");
+            std::fflush(stderr);
+            targets.push_back(userPresetTarget(set, schema, time, !saving));
+            snapshot.values.push_back(targets.back().oldValue);
+        }
+        if (saving) {
+            const auto root = libraryRoot();
+            std::fprintf(stderr, "[ALEXZSilentFilmOFX] preset write_file\n"); std::fflush(stderr);
+            silentfilm::saveUserPreset(root, snapshot);
+            const auto path = silentfilm::userPresetPath(root, snapshot.effect, name);
+            std::fprintf(stderr, "[ALEXZSilentFilmOFX] preset file_saved; update_path\n"); std::fflush(stderr);
+            require(parameters->paramSetValue(state.userPresetFile, path.c_str()), "saved preset file path");
+            try { refreshUserPresets(state, root); }
+            catch (const std::exception& error) {
+                userPresetStatus(state, "Сохранён: " + path + "; список не обновлён: " + error.what());
+                return kOfxStatOK;
+            }
+            std::fprintf(stderr, "[ALEXZSilentFilmOFX] preset update_status\n"); std::fflush(stderr);
+            userPresetStatus(state, "Сохранён: " + path);
+            return kOfxStatOK;
+        }
+        char* value = nullptr;
+        require(parameters->paramGetValue(state.userPresetFile, &value), "preset file to apply");
+        const std::string file(value ? value : "");
+        const auto loaded = !file.empty() && silentfilm::userPresetFileName(file) == name
+            ? silentfilm::loadUserPresetFile(file, snapshot.effect)
+            : silentfilm::loadUserPreset(libraryRoot(), snapshot.effect, name);
+        if (loaded.values.size() != targets.size()) throw Failure(kOfxStatErrValue, "Набор параметров пресета не соответствует этой версии OFX");
+        std::vector<silentfilm::UserPresetValue> values;
+        for (const auto& target : targets) {
+            const auto found = std::find_if(loaded.values.begin(), loaded.values.end(), [&](const auto& value) { return value.id == target.oldValue.id; });
+            if (found == loaded.values.end() || found->integer != target.integer
+                || found->value < target.minimum || found->value > target.maximum)
+                throw Failure(kOfxStatErrValue, "Параметр пресета несовместим или вне допустимого диапазона");
+            values.push_back(*found);
+        }
+        require(parameters->paramEditBegin(set, "Apply SilentFilm user preset"), "begin user preset edit");
+        try {
+            for (std::size_t i = 0; i < targets.size(); ++i)
+                require(targets[i].integer ? parameters->paramSetValue(targets[i].handle, static_cast<int>(values[i].value))
+                    : parameters->paramSetValue(targets[i].handle, values[i].value), "apply user preset value");
+        } catch (...) {
+            bool restored = true;
+            for (const auto& target : targets)
+                restored = (target.integer ? parameters->paramSetValue(target.handle, static_cast<int>(target.oldValue.value))
+                    : parameters->paramSetValue(target.handle, target.oldValue.value)) == kOfxStatOK && restored;
+            parameters->paramEditEnd(set);
+            if (!restored) throw Failure(kOfxStatFailed, "Хост прервал применение; восстановление части настроек не подтверждено. Используй Undo.");
+            throw;
+        }
+        require(parameters->paramEditEnd(set), "end user preset edit");
+        if (state.kind == EffectKind::Defects) updateDefectColorUi(state, time);
+        userPresetStatus(state, "Применён: " + name);
+    } catch (const std::exception& error) {
+        userPresetStatus(state, std::string("Ошибка: ") + error.what());
+        std::fprintf(stderr, "[ALEXZSilentFilmOFX] user preset: %s\n", error.what());
+    }
+    return kOfxStatOK;
 }
 
 /** Apply a preset on its button action and group all parameter edits into one undo entry. */
@@ -624,6 +931,13 @@ OfxStatus changed(OfxImageEffectHandle effect, OfxPropertySetHandle in)
 {
     char* name = nullptr;
     require(properties->propGetString(in, kOfxPropName, 0, &name), "changed parameter name");
+    auto& state = instance(effect);
+    if (state.editingUserPreset) return kOfxStatOK;
+    if (name && state.kind != EffectKind::Probe && (std::strcmp(name, "user_preset") == 0
+        || std::strcmp(name, "user_preset_name") == 0 || std::strcmp(name, "user_preset_file") == 0
+        || std::strcmp(name, "save_user_preset") == 0 || std::strcmp(name, "apply_user_preset") == 0
+        || std::strcmp(name, "refresh_user_presets") == 0))
+        return userPresetChanged(effect, state, name, actionTime(in));
     if (name && instance(effect).kind == EffectKind::CrankExposure
         && (std::strcmp(name, "exposure_map") == 0 || std::strcmp(name, "reload_map") == 0)) {
         instance(effect).exposureMaps.clear();
@@ -854,6 +1168,7 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         require(properties->propSetString(props, kOfxPropLabel, 0, "Reload Map"), "reload map label");
         const char* children[] = {"blend", "exposure_map", "frame_offset", "reload_map"};
         for (int i = 0; i < 4; ++i) require(properties->propSetString(page, kOfxParamPropPageChild, i, children[i]), "exposure page control");
+        defineUserPresetControls(set, page);
         return kOfxStatOK;
     }
     if (kind == EffectKind::Camera || kind == EffectKind::CameraOptics) {
@@ -922,13 +1237,22 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         const char* patterns[] = {"Dust", "Scratches", "Stains", "Development"};
         for (int i = 0; i < 4; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i, patterns[i]), "defect pattern option");
         require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "defect pattern default");
+        require(parameters->paramDefine(set, kOfxParamTypeChoice, "damage_type", &choice), "define defect damage model");
+        require(properties->propSetString(choice, kOfxPropLabel, 0, "Damage Model"), "defect damage label");
+        const char* damageModels[] = {"Legacy 0.29", "Comfy surface", "Comfy emulsion loss", "Comfy dirty"};
+        for (int i = 0; i < 4; ++i) require(properties->propSetString(choice, kOfxParamPropChoiceOption, i, damageModels[i]), "defect damage option");
+        require(properties->propSetInt(choice, kOfxParamPropDefault, 0, 0), "defect damage default");
+        optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
+            "Legacy сохраняет вид прежних проектов. Comfy: неровные формы и временная модель пыли/царапин. Surface — плотность 0,65×маска; Dirty — 1,5×маска; Emulsion loss — снятая эмульсия царапин/пятен, пыль остаётся непрозрачной. Для Capture/Printing/Projector все Comfy-варианты дают тень окна. Для сравнения с Comfy выбери Physical material и Blend=1. Проявка пока остаётся прежней."), "defect damage hint");
+        defineDouble(set, "irregularity", "Irregularity",
+            "Неровность формы и движения в моделях Comfy. 0 — ровные контуры/полосы; 0,6 — старт. Управляет эллиптическим контуром пыли/пятен, наклоном и прерывистостью царапин, шевелением пыли окна. Legacy и Development пока не используют параметр. Scratch Wander добавляет отдельное гуляние; для сравнения Comfy оставь его 0.", 0, 1, 0.6);
         defineDouble(set, "strength", "Strength",
             "В Perceptual — непрозрачность полного рисунка: 0 выключено, 0,5 половина, 1 полная сила; итоговая доля также умножается на Blend. Размер, seed и рисунок сохраняются. В Physical — прежняя сила маски/плотности материала, её вид после печати может быть нелинейным.", 0, 1, 0.15);
         defineDouble(set, "size", "Size (% width)", "Размер частиц, ширина царапины или размер поля относительно ширины кадра. Для пыли начните с 0,05–0,15; для пятен проявки — 5–15.", 0.01, 50, 0.12);
         defineDouble(set, "size_spread", "Size Spread (%)",
-            "Разброс размера пылинок/пятен относительно Size. 0 — одинаковый размер; 35 — от 65% до 135% заданного размера. Для царапин используется отдельный Thickness Spread. Не меняет количество и непрозрачность.", 0, 100, 35);
+            "Разброс размера пылинок/пятен. Legacy: 35 даёт 65–135% Size. Comfy: центр 105%, 35 даёт исходные 70–140% Size. 0 фиксирует диаметр, форма и непрозрачность могут различаться. Для царапин — Thickness Spread. В Comfy субпиксельный диаметр также ослабляет непрозрачность, как в референсе.", 0, 100, 35);
         defineDouble(set, "thickness_spread", "Thickness Spread (%)",
-            "Разброс толщины между царапинами относительно Size. 0 — одинаковая толщина; 50 — от 50% до 150%. Толщина конкретной царапины сохраняется в пределах Persistence; seed и перемотка воспроизводимы.", 0, 100, 35);
+            "Разброс толщины царапин. Legacy: 50 даёт 50–150% Size. Comfy при 35 воспроизводит два множителя референса: диаметр 0,7–1,4 и радиус 0,65–1,3. При 0 оба множителя фиксированы в своих центрах. Толщина сохраняется в событии Persistence; перезапуск событий каждой царапины сдвинут отдельно.", 0, 100, 35);
         defineDouble(set, "edge_bias", "Edge Bias",
             "Распределение пыли, царапин и пятен: 0 — равномерно, 1 — только у левого и правого краёв, в полосе около 12% ширины кадра. По высоте распределение остаётся равномерным. Промежуточные значения смешивают два распределения.", 0, 1, 0);
         defineDouble(set, "scratch_wander", "Scratch Wander (px @1920)",
@@ -966,9 +1290,9 @@ OfxStatus describeContext(OfxImageEffectHandle effect, EffectKind kind)
         optionalProperty(properties->propSetString(choice, kOfxParamPropHint, 0,
             "В обычной цепочке оставь sRGB. У Negative/Printing gamma не применяется: это физическое пропускание и поле отключено. У Capture/Positive/Projector ручной override нужен только при использовании ноды отдельно. Comfy color only восстанавливает sRGB, не меняя рисунок/силу."), "defect transfer contract hint");
         choice = page;
-        const char* children[] = {"blend", "mix_response", "material", "pattern", "strength", "size", "size_spread", "thickness_spread", "edge_bias",
+        const char* children[] = {"blend", "mix_response", "material", "pattern", "damage_type", "irregularity", "strength", "size", "size_spread", "thickness_spread", "edge_bias",
             "scratch_wander", "scratch_wander_time", "amount", "amount_variation", "amount_drift_time", "persistence", "seed", "encoding"};
-        for (int i = 0; i < 17; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
+        for (int i = 0; i < 19; ++i) require(properties->propSetString(choice, kOfxParamPropPageChild, i, children[i]), "defect page control");
         defineReferenceControls(set, page, kind);
         return kOfxStatOK;
     }
@@ -1047,6 +1371,8 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "strength", &state->defectStrength, nullptr), "defect strength parameter");
         require(parameters->paramGetHandle(set, "blend", &state->defectBlend, nullptr), "defect blend parameter");
         require(parameters->paramGetHandle(set, "mix_response", &state->defectMixResponse, nullptr), "defect mix response parameter");
+        require(parameters->paramGetHandle(set, "damage_type", &state->defectDamage, nullptr), "defect damage parameter");
+        require(parameters->paramGetHandle(set, "irregularity", &state->defectIrregularity, nullptr), "defect irregularity parameter");
         require(parameters->paramGetHandle(set, "size", &state->defectSize, nullptr), "defect size parameter");
         require(parameters->paramGetHandle(set, "size_spread", &state->defectSizeSpread, nullptr), "defect size spread parameter");
         require(parameters->paramGetHandle(set, "thickness_spread", &state->defectThicknessSpread, nullptr), "defect thickness spread parameter");
@@ -1072,6 +1398,13 @@ OfxStatus create(OfxImageEffectHandle effect, EffectKind kind)
         require(parameters->paramGetHandle(set, "grain_seed", &state->grainSeed, nullptr), "grain seed parameter");
         require(parameters->paramGetHandle(set, "encoding", &state->encoding, nullptr), "film encoding parameter");
         if (kind == EffectKind::Negative) require(parameters->paramGetHandle(set, "preview_positive", &state->positivePreview, nullptr), "film preview parameter");
+    }
+    if (kind != EffectKind::Probe) {
+        require(parameters->paramGetHandle(set, "user_preset_name", &state->userPresetName, nullptr), "user preset name handle");
+        require(parameters->paramGetHandle(set, "user_preset", &state->userPresetChoice, nullptr), "user preset choice handle");
+        require(parameters->paramGetHandle(set, "user_preset_file", &state->userPresetFile, nullptr), "user preset file handle");
+        require(parameters->paramGetHandle(set, "user_preset_catalog", &state->userPresetCatalog, nullptr), "user preset catalog handle");
+        require(parameters->paramGetHandle(set, "user_preset_status", &state->userPresetStatus, nullptr), "user preset status handle");
     }
     updateDefectColorUi(*state, 0);
     require(properties->propSetPointer(effectProperties(effect), kOfxPropInstanceData, 0, state.get()), "store instance");
@@ -1395,6 +1728,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
     silentfilm::DefectParameters defects;
     if (isDefects) {
         int material = 0, pattern = 0, persistence = 48, seed = 1925, transfer = 1, mixResponse = 0;
+        int damage = 0;
+        double irregularity = 0.6;
         double strength = 0.15, size = 0.12, amount = 3, blend = 1;
         double sizeSpread = 35, thicknessSpread = 35, edgeBias = 0, wander = 0, wanderTime = 8;
         double amountVariation = 0, amountDriftTime = 48;
@@ -1403,6 +1738,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         require(parameters->paramGetValueAtTime(state.defectStrength, time, &strength), "read defect strength");
         require(parameters->paramGetValueAtTime(state.defectBlend, time, &blend), "read defect blend");
         require(parameters->paramGetValueAtTime(state.defectMixResponse, time, &mixResponse), "read defect mix response");
+        require(parameters->paramGetValueAtTime(state.defectDamage, time, &damage), "read defect damage");
+        require(parameters->paramGetValueAtTime(state.defectIrregularity, time, &irregularity), "read defect irregularity");
         require(parameters->paramGetValueAtTime(state.defectSize, time, &size), "read defect size");
         require(parameters->paramGetValueAtTime(state.defectSizeSpread, time, &sizeSpread), "read defect size spread");
         require(parameters->paramGetValueAtTime(state.defectThicknessSpread, time, &thicknessSpread), "read defect thickness spread");
@@ -1415,7 +1752,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         require(parameters->paramGetValueAtTime(state.defectPersistence, time, &persistence), "read defect persistence");
         require(parameters->paramGetValueAtTime(state.defectSeed, time, &seed), "read defect seed");
         require(parameters->paramGetValueAtTime(state.encoding, time, &transfer), "read defect transfer");
-        if (material < 0 || material > 4 || pattern < 0 || pattern > 3 || persistence < 1
+        if (material < 0 || material > 4 || pattern < 0 || pattern > 3 || persistence < 1 || damage < 0 || damage > 3
+            || !std::isfinite(irregularity) || irregularity < 0 || irregularity > 1
             || !std::isfinite(strength) || strength < 0 || strength > 1 || !std::isfinite(size) || size < 0.01 || size > 50
             || !std::isfinite(amount) || amount < 0 || amount > 24 || transfer < 0 || transfer > 2)
             throw Failure(kOfxStatErrValue, "Invalid defect parameter value");
@@ -1434,6 +1772,8 @@ OfxStatus render(OfxImageEffectHandle effect, OfxPropertySetHandle in)
         defects.strength = static_cast<float>(strength); defects.size = static_cast<float>(size);
         defects.blend = static_cast<float>(blend);
         defects.mixResponse = static_cast<silentfilm::DefectMixResponse>(mixResponse);
+        defects.damage = static_cast<silentfilm::DefectDamage>(damage);
+        defects.irregularity = static_cast<float>(irregularity);
         defects.amount = static_cast<float>(amount); defects.persistence = persistence;
         defects.sizeSpreadPercent = static_cast<float>(sizeSpread);
         defects.thicknessSpreadPercent = static_cast<float>(thicknessSpread);
@@ -1662,14 +2002,14 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
 void setHost(OfxHost* value) { host = value; }
 
 OfxPlugin plugins[] = {
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 29, setHost, entry<EffectKind::CrankExposure>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.crankexposure", 0, 34, setHost, entry<EffectKind::CrankExposure>},
     {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.hostprobe", 0, 6, setHost, entry<EffectKind::Probe>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 25, setHost, entry<EffectKind::Camera>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 25, setHost, entry<EffectKind::Negative>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 25, setHost, entry<EffectKind::Print>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 25, setHost, entry<EffectKind::Projector>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 25, setHost, entry<EffectKind::Defects>},
-    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 25, setHost, entry<EffectKind::CameraOptics>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.camera", 0, 34, setHost, entry<EffectKind::Camera>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.negative", 0, 34, setHost, entry<EffectKind::Negative>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.print", 0, 34, setHost, entry<EffectKind::Print>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.projector", 0, 34, setHost, entry<EffectKind::Projector>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.defects", 0, 34, setHost, entry<EffectKind::Defects>},
+    {kOfxImageEffectPluginApi, 1, "com.alexz.silentfilm.cameraoptics", 0, 34, setHost, entry<EffectKind::CameraOptics>},
 };
 
 constexpr int pluginCount = static_cast<int>(sizeof(plugins) / sizeof(plugins[0]));

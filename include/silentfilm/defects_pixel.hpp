@@ -12,6 +12,8 @@ namespace silentfilm {
 
 struct DefectParticle {
     float x = 0, y = 0, radius = 0, drift = 0;
+    float cosine = 1, sine = 0, aspect = 1, phase = 0;
+    float opacity = 1, gapTop = 1, gapBottom = 1, support = 0;
 };
 
 /** Small immutable per-frame geometry; never contains a host image pointer. */
@@ -28,6 +30,37 @@ struct DefectFrame {
 DefectFrame prepareDefects(const DefectParameters& parameters, int width, int height);
 
 namespace defect {
+
+/** Rasterize the Comfy speck/stain and scratch equations for prepared geometry. */
+SILENTFILM_DEFECT_HD inline float particleCoverage(float px, float py, int height,
+    const DefectParticle& particle, const DefectParameters& p) noexcept
+{
+    if (p.pattern == DefectPattern::Scratches) {
+        const float t = py / ::fmaxf(1, static_cast<float>(height));
+        if (px < ::floorf(particle.y - particle.support - 2) + 0.5f
+            || px >= ::ceilf(particle.y + particle.support + 2) + 0.5f) return 0;
+        const float center = particle.x + particle.drift * (t - 0.5f);
+        const float line = film::clamp(particle.radius + 0.5f - ::fabsf(px - center), 0, 1);
+        const float gaps = film::clamp((particle.gapTop + (particle.gapBottom - particle.gapTop) * t) * 2.5f, 0, 1);
+        return line * ((1 - p.irregularity) + p.irregularity * gaps) * particle.opacity;
+    }
+    const float dx = px - particle.x, dy = py - particle.y;
+    if (::fabsf(dx) > particle.support + 2 || ::fabsf(dy) > particle.support + 2) return 0;
+    if (px < ::floorf(particle.x - particle.support - 2) + 0.5f
+        || px >= ::ceilf(particle.x + particle.support + 2) + 0.5f
+        || py < ::floorf(particle.y - particle.support - 2) + 0.5f
+        || py >= ::ceilf(particle.y + particle.support + 2) + 0.5f) return 0;
+    const float u = dx * particle.cosine + dy * particle.sine;
+    const float v = (-dx * particle.sine + dy * particle.cosine) / particle.aspect;
+    const float theta = ::atan2f(v, u);
+    const float edge = particle.radius * (1 + p.irregularity
+        * (0.16f * ::sinf(3 * theta + particle.phase) + 0.09f * ::cosf(5 * theta - particle.phase)));
+    const float distanceSquared = u * u + v * v;
+    const float mark = p.pattern == DefectPattern::Stains
+        ? ::expf(-1.5f * distanceSquared / (::fmaxf(edge, 0.1f) * ::fmaxf(edge, 0.1f)))
+        : film::clamp(edge + 0.5f - ::sqrtf(distanceSquared), 0, 1);
+    return mark * particle.opacity;
+}
 
 SILENTFILM_DEFECT_HD inline bool neutral(const DefectParameters& p) noexcept
 {
@@ -74,7 +107,9 @@ SILENTFILM_DEFECT_HD inline float coverage(float px, float py, int height, const
     for (int i = 0; i < frame.count; ++i) {
         const auto& particle = frame.particles[static_cast<std::size_t>(i)];
         float mark = 0;
-        if (frame.parameters.pattern == DefectPattern::Scratches) {
+        if (frame.parameters.damage != DefectDamage::Legacy) {
+            mark = particleCoverage(px, py, height, particle, frame.parameters);
+        } else if (frame.parameters.pattern == DefectPattern::Scratches) {
             const float center = particle.x + particle.drift * (py / ::fmaxf(1, static_cast<float>(height)) - 0.5f);
             const float distance = ::fabsf(px - center);
             if (distance >= 0.5f + particle.radius) continue;
@@ -125,6 +160,19 @@ SILENTFILM_DEFECT_HD inline float shade(float value, float multiplier, float cov
     const bool physical = p.material == DefectMaterial::Negative || p.material == DefectMaterial::Printing;
     if (!physical) value = film::decode(value, p.transfer);
     if (p.pattern == DefectPattern::Development) value *= multiplier;
+    else if (p.damage != DefectDamage::Legacy) {
+        const bool gate = p.material == DefectMaterial::Capture || p.material == DefectMaterial::Printing
+            || p.material == DefectMaterial::Projector;
+        if (gate) value *= 1 - coverage;
+        else if (p.damage == DefectDamage::EmulsionLoss) {
+            if (p.pattern == DefectPattern::Dust) value *= 1 - coverage;
+            else {
+                const float clear = physical ? 0.79432823f : 1.0f;
+                value += (::fmaxf(clear, value) - value) * coverage;
+            }
+        } else value *= ::powf(10.0f, -(p.damage == DefectDamage::Dirty ? 1.5f : 0.65f) * coverage);
+        value = film::clamp(value, 0, 1);
+    }
     else if (p.material == DefectMaterial::Negative && p.pattern == DefectPattern::Scratches)
         value += (::fmaxf(0.79432823f, value) - value) * coverage;
     else value *= 1 - coverage;

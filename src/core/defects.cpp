@@ -39,6 +39,66 @@ DefectFrame prepareDefects(const DefectParameters& p, int width, int height)
     const int whole = static_cast<int>(std::floor(amount));
     const float fraction = amount - whole;
     const int count = std::min(64, whole + (fraction > 0 && whole < 64 ? 1 : 0));
+    if (p.damage != DefectDamage::Legacy) {
+        const bool gate = p.material == DefectMaterial::Capture || p.material == DefectMaterial::Printing
+            || p.material == DefectMaterial::Projector;
+        for (int i = 0; i < count; ++i) {
+            const auto identity = p.seed ^ (static_cast<std::uint32_t>(i) * 0xc2b2ae35u);
+            const int phase = static_cast<int>(defect::unit(identity ^ 0x50484153u) * std::max(1, p.persistence));
+            const auto slotEvent = static_cast<std::int64_t>(std::floor(static_cast<double>(frame + phase) / std::max(1, p.persistence)));
+            const auto index = !gate && p.pattern == DefectPattern::Dust ? frame : slotEvent;
+            const auto key = identity ^ film::hash(static_cast<std::uint32_t>(index))
+                ^ (static_cast<std::uint32_t>(p.pattern) * 0x27d4eb2du);
+            if (i >= whole && defect::unit(key ^ 0xa511e9b3u) >= fraction) continue;
+            auto& particle = result.particles[result.count++];
+            particle.x = defect::unit(key) * width;
+            particle.y = defect::unit(key ^ 0x68bc21ebu) * height;
+            if (p.edgeBias > 0 && defect::unit(key ^ 0x45444745u) < p.edgeBias) {
+                const bool left = defect::unit(key ^ 0x53494445u) < 0.5f;
+                const float distance = -0.01f + 0.13f * defect::unit(key ^ 0x42414e44u);
+                particle.x = width * (left ? distance : 1 - distance);
+            }
+            const float spread = (p.pattern == DefectPattern::Scratches ? p.thicknessSpreadPercent : p.sizeSpreadPercent) * 0.01f;
+            const float diameter = width * p.size * 0.01f
+                * (1.05f + spread * (2 * defect::unit(key ^ 0x02e5be93u) - 1));
+            if (p.pattern == DefectPattern::Scratches) {
+                particle.radius = std::max(0.2f, diameter * 0.5f)
+                    * std::max(0.0f, 0.975f + (0.325f / 0.35f) * spread * (2 * defect::unit(key ^ 0x52414449u) - 1));
+                const float amplitude = width * 0.008f * p.irregularity;
+                const float left = 2 * defect::unit(key ^ film::hash(static_cast<std::uint32_t>(frame)) ^ 0x50415448u) - 1;
+                const float right = 2 * defect::unit(key ^ film::hash(static_cast<std::uint32_t>(frame + 1)) ^ 0x50415448u) - 1;
+                particle.y = particle.x; // Для царапины y хранит центр ограниченной полосы rasterizer.
+                particle.x += amplitude * (left + right) * 0.5f;
+                particle.drift = amplitude * (right - left);
+                particle.support = amplitude + particle.radius;
+                if (p.scratchWander > 0) {
+                    const double period = std::max(1, p.scratchWanderTime);
+                    const float a = smoothSignal(identity, static_cast<double>(frame) / period, 0x57414e44u);
+                    const float b = smoothSignal(identity, (static_cast<double>(frame) + 1) / period, 0x57414e44u);
+                    const float extra = p.scratchWander * width / 1920.0f;
+                    particle.x += extra * (a + b) * 0.5f;
+                    particle.drift += extra * (b - a);
+                    particle.support += extra;
+                }
+                particle.gapTop = defect::unit(key ^ film::hash(static_cast<std::uint32_t>(frame)) ^ 0x47415053u);
+                particle.gapBottom = defect::unit(key ^ film::hash(static_cast<std::uint32_t>(frame + 1)) ^ 0x47415053u);
+                particle.opacity = std::min(1.0f, diameter / 0.6f);
+            } else {
+                if (gate) {
+                    particle.x += diameter * p.irregularity * smoothSignal(key, frame / 8.0, 0x584d4f56u);
+                    particle.y += diameter * p.irregularity * smoothSignal(key, frame / 8.0, 0x594d4f56u);
+                }
+                particle.radius = std::max(0.3f, diameter * 0.5f);
+                const float angle = -3.14159265358979323846f + 6.28318530717958647692f * defect::unit(key ^ 0x414e474cu);
+                particle.cosine = std::cos(angle); particle.sine = std::sin(angle);
+                particle.aspect = 0.55f + 0.65f * defect::unit(key ^ 0x41535045u);
+                particle.phase = -3.14159265358979323846f + 6.28318530717958647692f * defect::unit(key ^ 0x50484153u);
+                particle.opacity = std::min(1.0f, diameter / 0.7f) * (0.55f + 0.45f * defect::unit(key ^ 0x4f504143u));
+                particle.support = particle.radius * (p.pattern == DefectPattern::Stains ? 3.0f : 1.5f);
+            }
+        }
+        return result;
+    }
     const float radius = std::max(0.35f, width * p.size * 0.01f * 0.5f);
     for (int i = 0; i < count; ++i) {
         const auto key = result.base ^ (static_cast<std::uint32_t>(i) * 0xc2b2ae35u);

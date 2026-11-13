@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -301,17 +303,128 @@ void negativePrintOpacity()
     const auto visible = emulsionPixel(defect::apply(source, 5.5f, 5.5f, 12, old), print);
     require(visible.r < 0.95f, "Regression fixture no longer reproduces amplification of tiny physical negative scratches");
 }
+/** Export fixed geometry independently replayable by the actual Python mask functions. */
+void dumpComfyFixtures(const std::filesystem::path& directory)
+{
+    constexpr int width = 31, height = 19;
+    std::filesystem::create_directories(directory);
+    const auto write = [&](const std::string& name, const std::vector<float>& pixels) {
+        std::ofstream stream(directory / name, std::ios::binary);
+        stream.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size() * sizeof(float)));
+        require(static_cast<bool>(stream), "Cannot write Comfy defects fixture");
+    };
+    for (int pattern = 0; pattern < 3; ++pattern) {
+        DefectFrame frame;
+        frame.parameters.damage = DefectDamage::Surface;
+        frame.parameters.pattern = static_cast<DefectPattern>(pattern);
+        frame.parameters.mixResponse = DefectMixResponse::Physical;
+        frame.parameters.strength = 1;
+        frame.parameters.irregularity = 0.6f;
+        frame.count = 2;
+        for (int slot = 0; slot < 2; ++slot) {
+            auto& particle = frame.particles[slot];
+            const float diameter = slot == 0 ? (pattern == 2 ? 5.5f : pattern == 1 ? 1.2f : 3.2f) : 0.35f;
+            particle.x = slot == 0 ? 7.25f : 8.25f;
+            particle.y = slot == 0 ? 8.75f : 9.25f;
+            if (pattern == 1) {
+                particle.y = particle.x;
+                const float amplitude = width * 0.008f * frame.parameters.irregularity;
+                particle.x += amplitude * (-0.4f + 0.8f) * 0.5f;
+                particle.drift = amplitude * (0.8f + 0.4f);
+                particle.radius = std::max(0.2f, diameter * 0.5f) * (slot == 0 ? 0.9f : 1.2f);
+                particle.support = amplitude + particle.radius;
+                particle.opacity = std::min(1.0f, diameter / 0.6f);
+                particle.gapTop = 0.15f; particle.gapBottom = 0.75f;
+            } else {
+                particle.radius = std::max(0.3f, diameter * 0.5f);
+                const float angle = slot == 0 ? 0.3f : -0.6f;
+                particle.cosine = std::cos(angle); particle.sine = std::sin(angle);
+                particle.aspect = slot == 0 ? 0.7f : 1.1f;
+                particle.phase = slot == 0 ? -0.4f : 0.8f;
+                particle.opacity = std::min(1.0f, diameter / 0.7f) * (slot == 0 ? 0.8f : 0.65f);
+                particle.support = particle.radius * (pattern == 2 ? 3.0f : 1.5f);
+            }
+        }
+        std::vector<float> mask(width * height);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                mask[static_cast<std::size_t>(y * width + x)] = defect::coverage(x + 0.5f, y + 0.5f, height, frame);
+        write("mask_" + std::to_string(pattern) + ".f32", mask);
+        for (int material = 0; material < 5; ++material)
+            for (int damage = 1; damage <= 3; ++damage) {
+                auto& p = frame.parameters;
+                p.material = static_cast<DefectMaterial>(material); p.damage = static_cast<DefectDamage>(damage);
+                p.transfer = Transfer::Linear; p.strength = 0.37f;
+                std::vector<float> image(width * height * 4);
+                for (int y = 0; y < height; ++y)
+                    for (int x = 0; x < width; ++x) {
+                        const Pixel pixel = defect::apply({0.002f, 0.3f, 0.9f, 0.5f}, x + 0.5f, y + 0.5f, height, frame);
+                        const auto offset = static_cast<std::size_t>(y * width + x) * 4;
+                        image[offset] = pixel.r; image[offset + 1] = pixel.g; image[offset + 2] = pixel.b; image[offset + 3] = pixel.a;
+                    }
+                write("image_" + std::to_string(pattern) + "_" + std::to_string(material) + "_" + std::to_string(damage) + ".f32", image);
+            }
+    }
+}
+
+/** Check material physics independently of the geometric mask and legacy reference. */
+void comfyMaterials()
+{
+    for (int material = 0; material < 5; ++material)
+        for (int pattern = 0; pattern < 3; ++pattern)
+            for (int damage = 1; damage <= 3; ++damage)
+                for (float strength : {0.0f, 0.001f, 0.37f, 1.0f}) {
+                    DefectParameters p;
+                    p.material = static_cast<DefectMaterial>(material); p.pattern = static_cast<DefectPattern>(pattern);
+                    p.damage = static_cast<DefectDamage>(damage); p.transfer = Transfer::Linear;
+                    p.strength = strength; p.mixResponse = DefectMixResponse::Physical;
+                    const float mask = 0.7f * strength, source = 0.12f;
+                    const bool gate = material == 0 || material == 2 || material == 4;
+                    double expected = source;
+                    if (gate || (damage == 2 && pattern == 0)) expected *= 1 - mask;
+                    else if (damage == 2) expected += (std::pow(10.0, material == 1 ? -0.1 : 0.0) - source) * mask;
+                    else expected *= std::pow(10.0, -(damage == 3 ? 1.5 : 0.65) * mask);
+                    require(std::abs(defect::shade(source, 1, mask, p) - expected) < 2e-6,
+                        "Comfy damage material equation differs from independent density/transmission oracle");
+                }
+    for (int material = 0; material < 5; ++material)
+        for (int pattern = 0; pattern < 3; ++pattern)
+            for (int damage = 1; damage <= 3; ++damage)
+                for (int alpha = 0; alpha < 4; ++alpha) {
+                    DefectParameters p;
+                    p.material = static_cast<DefectMaterial>(material); p.pattern = static_cast<DefectPattern>(pattern);
+                    p.damage = static_cast<DefectDamage>(damage); p.size = pattern == 2 ? 10 : 4;
+                    p.amount = 12.5f; p.time = 2.375; p.irregularity = 0.6f;
+                    p.sourcePremultiplied = alpha % 2; p.outputPremultiplied = alpha / 2;
+                    for (const auto response : {DefectMixResponse::Physical, DefectMixResponse::Perceptual}) {
+                        p.mixResponse = response;
+                        run(p, true, false);
+#ifdef SILENTFILM_TEST_CUDA
+                        if (alpha == 0 && damage == 1) run(p, false, false);
+#endif
+                    }
+                }
+    DefectParameters p;
+    p.damage = DefectDamage::Surface; p.material = DefectMaterial::Negative; p.amount = 6;
+    p.time = 0; const auto first = prepareDefects(p, 1920, 1080);
+    p.time = 1 / p.frameRate; const auto next = prepareDefects(p, 1920, 1080);
+    p.time = 0; const auto repeat = prepareDefects(p, 1920, 1080);
+    require(first.count == repeat.count && first.particles[0].x == repeat.particles[0].x,
+        "Comfy-style geometry depends on render order");
+    require(first.particles[0].x != next.particles[0].x, "Film dust must change each physical frame");
+}
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 3 && std::string(argv[1]) == "--dump-comfy") { dumpComfyFixtures(argv[2]); return 0; }
 #ifdef SILENTFILM_TEST_CUDA
         int count = 0; const auto status = cudaGetDeviceCount(&count);
         if (status == cudaErrorNoDevice || (status == cudaSuccess && count == 0)) return 77;
         require(status == cudaSuccess, "CUDA device query failed");
 #endif
-        timingAndBypass(); particleControls(); negativePrintOpacity();
+        timingAndBypass(); particleControls(); negativePrintOpacity(); comfyMaterials();
         for (int material = 0; material < 5; ++material) {
             for (int pattern = 0; pattern < 4; ++pattern) {
                 for (int mode = 0; mode < 4; ++mode) {
@@ -341,6 +454,6 @@ int main()
                 }
             }
         }
-        std::cout << "Defects optimized CPU/CUDA vs legacy: PASS\n"; return 0;
+        std::cout << "Defects legacy and Comfy materials CPU/CUDA: PASS\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

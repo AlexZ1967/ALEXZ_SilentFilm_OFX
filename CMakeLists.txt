@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ALEXZSilentFilmOFX VERSION 0.29.0 LANGUAGES CXX)
+project(ALEXZSilentFilmOFX VERSION 0.34.0 LANGUAGES CXX)
 
 option(SILENTFILM_ENABLE_CUDA "Собрать CUDA backend и тест сравнения CPU/CUDA" OFF)
 option(SILENTFILM_BUILD_CADENCE "Собрать нативный каденс и launcher отдельного окна (Linux)" ON)
@@ -36,9 +36,15 @@ set_target_properties(silentfilm_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
+add_library(silentfilm_preset_storage STATIC src/platform/user_presets.cpp)
+target_include_directories(silentfilm_preset_storage PUBLIC include)
+target_compile_features(silentfilm_preset_storage PUBLIC cxx_std_17)
+set_target_properties(silentfilm_preset_storage PROPERTIES
+    POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+
 add_library(ALEXZSilentFilm MODULE src/ofx/plugin.cpp)
 target_include_directories(ALEXZSilentFilm PRIVATE "${OFX_INCLUDE_DIR}")
-target_link_libraries(ALEXZSilentFilm PRIVATE silentfilm_core)
+target_link_libraries(ALEXZSilentFilm PRIVATE silentfilm_core silentfilm_preset_storage)
 target_compile_features(ALEXZSilentFilm PRIVATE cxx_std_17)
 
 if(SILENTFILM_ENABLE_CUDA)
@@ -183,6 +189,19 @@ if(BUILD_TESTING)
     add_executable(silentfilm_defects_tests tests/defects_tests.cpp)
     target_link_libraries(silentfilm_defects_tests PRIVATE silentfilm_core)
     add_test(NAME silentfilm_defects COMMAND silentfilm_defects_tests)
+    add_executable(silentfilm_user_presets_tests tests/user_presets_tests.cpp)
+    target_link_libraries(silentfilm_user_presets_tests PRIVATE silentfilm_preset_storage)
+    add_test(NAME silentfilm_user_presets COMMAND silentfilm_user_presets_tests "${CMAKE_CURRENT_BINARY_DIR}/test-user-presets")
+    add_executable(silentfilm_ofx_preset_lifecycle_tests tests/ofx_preset_lifecycle_tests.cpp)
+    target_include_directories(silentfilm_ofx_preset_lifecycle_tests PRIVATE "${OFX_INCLUDE_DIR}")
+    target_link_libraries(silentfilm_ofx_preset_lifecycle_tests PRIVATE silentfilm_core silentfilm_preset_storage)
+    add_test(NAME silentfilm_ofx_preset_lifecycle COMMAND silentfilm_ofx_preset_lifecycle_tests "${CMAKE_CURRENT_BINARY_DIR}/test-ofx-preset-lifecycle")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(silentfilm_preset_abi_tests tests/preset_abi_tests.cpp)
+        target_link_libraries(silentfilm_preset_abi_tests PRIVATE silentfilm_preset_storage)
+        set_target_properties(silentfilm_preset_abi_tests PROPERTIES ENABLE_EXPORTS ON)
+        add_test(NAME silentfilm_preset_abi COMMAND silentfilm_preset_abi_tests "${CMAKE_CURRENT_BINARY_DIR}/test-preset-abi")
+    endif()
     if(SILENTFILM_ENABLE_CUDA)
         add_executable(silentfilm_crank_exposure_cuda_tests tests/crank_exposure_tests.cpp)
         target_compile_definitions(silentfilm_crank_exposure_cuda_tests PRIVATE SILENTFILM_TEST_CUDA=1)
