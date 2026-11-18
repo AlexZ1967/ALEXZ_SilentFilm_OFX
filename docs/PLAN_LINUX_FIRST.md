@@ -2,6 +2,9 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-18 — локальный коммит Windows OFX/Cadence и TemporalProbe:** `2e05132`; Linux32/32 Passed.
+- [ ] Push в GitHub: SSH host key mismatch; HTTPS без credentials. Публикация не состоялась, требуется восстановить проверенный доступ.
+
 - [x] ✅ **2026-11-18 — агент по прямому запросу пользователя выполнил Linux-регрессию:** configure/build Release CUDA86 и CTest **32/32 Passed, без пропусков, 9.27с**. TCP/abstract provider, PNG/Unicode, platform lifecycle и все CUDA parity прошли. Windows/Resolve пока не проверены.
 
 - [x] ✅ **2026-11-18 — подготовлен полный Windows Cadence:** native helper MSVC/FFmpeg/OpenCV, CUDA, WinSock loopback transport, Unicode/atomic status, GTK launcher/Resolve menu и упаковка. Добавлены transport/platform regressions. **Не запускались:** сборки/тесты/Resolve. [Приёмка](WINDOWS_CADENCE_APP.md).

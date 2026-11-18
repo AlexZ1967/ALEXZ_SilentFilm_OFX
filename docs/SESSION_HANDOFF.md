@@ -1,5 +1,13 @@
 # Состояние проекта для нового диалога
 
+## Локальный коммит; push заблокирован — 2026-11-18
+
+✅ **2026-11-18 — изменения оформлены локальным коммитом `2e05132`** «Подготовить Windows OFX/Cadence и диагностику ретайминга»: полный текущий срез из47файлов, включая подключённый CMake TemporalProbe и его скрипты/инструкцию. Linux configure/build/CTest ранее прошли32/32 без пропусков; git diff --cached --check прошёл после удаления лишней пустой строки документации. Бинарники, renders и diagnostics не включены.
+
+**На GitHub пока не отправлено.** `git push origin main` остановлен StrictHostKeyChecking: сервер предложил Ed25519 `SHA256:TlgYjYt/moZ1/oY+m6SBD5amdOwAC2j/if1eHW3SZYg`, не совпадающий с опубликованным GitHub `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`. Проверена официальная страница GitHub SSH key fingerprints. HTTPS push с отключёнными интерактивными запросами тоже не прошёл: нет credential/Username. Попытка прочитать ключ SSH endpoint443 не получила ответа. SSH-конфигурация/known_hosts/remote не менялись, проверка ключа не отключалась.
+
+Следующий шаг публикации — восстановить проверенный GitHub-доступ и повторить `git push origin main`. Не выдавать локальный commit за опубликованный; Windows source/runtime проверки всё ещё ожидаются.
+
 ## Linux-регрессия Windows-переноса — подтверждена 2026-11-18
 
 ✅ **2026-11-18 — по прямому разрешению пользователя агент выполнил Linux configure/build/CTest:** `cmake -S . -B build-cuda`, `cmake --build build-cuda --parallel 2`, `ctest --test-dir build-cuda --output-on-failure`. Все команды завершились с кодом0. Конфигурация Release, CUDA ON, architectures86, Cadence ON. Сборка дошла до100%, включая OFX, TemporalProbe и native Cadence. **32/32 Passed, 0 Failed, без Skipped, 9.27с.** Исправления по результатам этого запуска не понадобились.
