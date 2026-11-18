@@ -3,7 +3,7 @@
 ## Актуальная очередь после0.34
 
 - [x] ✅ **2026-11-18 — локальный коммит Windows OFX/Cadence и TemporalProbe:** `2e05132`; Linux32/32 Passed.
-- [ ] Push в GitHub: SSH host key mismatch; HTTPS без credentials. Публикация не состоялась, требуется восстановить проверенный доступ.
+- [x] ✅ **2026-11-18 — push восстановлен и подтверждён:** `b042f66 → 3326d7d`, через разовый прямой адрес с проверкой официального SSH key. Пользовательский ключ работает; локальное разрешение github.com ведёт на другой сервер. Системные настройки не менялись.
 
 - [x] ✅ **2026-11-18 — агент по прямому запросу пользователя выполнил Linux-регрессию:** configure/build Release CUDA86 и CTest **32/32 Passed, без пропусков, 9.27с**. TCP/abstract provider, PNG/Unicode, platform lifecycle и все CUDA parity прошли. Windows/Resolve пока не проверены.
 

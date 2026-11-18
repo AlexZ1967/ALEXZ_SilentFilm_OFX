@@ -1,5 +1,13 @@
 # Состояние проекта для нового диалога
 
+## Публикация восстановлена — 2026-11-18
+
+✅ **2026-11-18 — push успешно выполнен:** `origin/main` обновлён `b042f66 → 3326d7d`, включая основной коммит `2e05132` Windows OFX/Cadence/TemporalProbe. Прежняя блокировка публикации устранена для этой отправки.
+
+Причина отказа уточнена: системное разрешение `github.com` через getent вернуло `45.86.72.85`, предъявляющий неофициальный host key. Публичный DNS по HTTPS вернул `140.82.121.4`; адрес попал в git ranges официального GitHub Meta API. Прямое SSH-подключение к этому адресу с `HostKeyAlias=github.com` и `StrictHostKeyChecking=yes` подтвердило официальный сохранённый Ed25519 key; GitHub ответил `Hi AlexZ1967! You've successfully authenticated`. Пользовательский ключ исправен; прежняя фраза «нет авторизации» относилась к отдельной HTTPS-попытке без credentials.
+
+Отправка выполнена разовым `git -c core.sshCommand='ssh -o BatchMode=yes -o ConnectTimeout=10 -o Hostname=140.82.121.4 -o HostKeyAlias=github.com -o StrictHostKeyChecking=yes -o UpdateHostKeys=no' push origin main`. Системный DNS, hosts, SSH config, known_hosts и remote не изменялись. **IP относится к этому наблюдению, не считать постоянной настройкой GitHub.** Для обычных последующих подключений остаётся разобраться с локальным разрешением имени (DNS/VPN/hosts); конкретный источник подмены не установлен. Windows проверки по-прежнему ожидаются; Linux32/32 Passed сохранено.
+
 ## Локальный коммит; push заблокирован — 2026-11-18
 
 ✅ **2026-11-18 — изменения оформлены локальным коммитом `2e05132`** «Подготовить Windows OFX/Cadence и диагностику ретайминга»: полный текущий срез из47файлов, включая подключённый CMake TemporalProbe и его скрипты/инструкцию. Linux configure/build/CTest ранее прошли32/32 без пропусков; git diff --cached --check прошёл после удаления лишней пустой строки документации. Бинарники, renders и diagnostics не включены.
