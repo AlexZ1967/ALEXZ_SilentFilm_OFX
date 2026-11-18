@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+import os
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -18,7 +19,7 @@ class ColorPreset(unittest.TestCase):
         self.template = color.template_path()
         self.document = self.template.read_text(encoding="utf-8")
         self.original = bytes.fromhex(color.body_text(self.document))
-        self.map = self.root / 'Кино "A"' / "exposure.sfexposure"
+        self.map = self.root / ('Кино & A' if os.name == "nt" else 'Кино "A"') / "exposure.sfexposure"
         self.map.parent.mkdir()
         self.map.write_text("SILENTFILM_CRANK_EXPOSURE 1\nofx 25 3\n0 1\n1 0.5\n2 2\n", encoding="utf-8")
 

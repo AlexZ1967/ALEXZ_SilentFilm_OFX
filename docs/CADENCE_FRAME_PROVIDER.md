@@ -1,5 +1,7 @@
 # Прямые кадры Resolve — 2026-11-12
 
+**Дополнение 2026-11-18:** подготовлен Windows loopback TCP transport и полный Cadence package. [Сборка/запуск/проверки](WINDOWS_CADENCE_APP.md); описание расширения протокола — в конце документа. Ниже сначала описана исходная Linux-реализация.
+
 ✅ Подготовлен путь обработанного входа без промежуточного ролика. Пользовательская сборка и runtime нового пути ещё не подтверждены.
 
 ## Поток данных
@@ -34,3 +36,8 @@ cmake --build build-cuda --parallel 2 && ctest --test-dir build-cuda --output-on
 
 
 ✅ **2026-11-12 — подготовлена регрессия целостности изображения:** каждый отдельный PNG передаётся decoder с AV_PKT_FLAG_KEY, чтобы исключить delta-сложение с предшествующим кадром. CTest расширен чередующимися RGB48 PNG и точным сравнением float-пикселей до GPU. Пользовательский повторный прогон после исправления ещё ожидается.
+# Windows-перенос — 2026-11-18
+
+Подготовлен тот же протокол V1 поверх loopback TCP: `transport=tcp`, `socket_host=127.0.0.1`, случайный `socket_port`, прежний64символьный token. Сервер Python принимает только локальные подключения, C++ использует WinSock с nonblocking ожиданием и RAII. На Linux сохранён abstract socket и добавлена возможность TCP для проверки общего протокола; старые metadata без transport продолжают означать abstract Unix socket. Переноса GPU images через API нет: PNG → CPU decode → существующий CPU/CUDA pipeline.
+
+Добавлены `silentfilm_cadence_platform` и `silentfilm_frame_provider_tcp`, включая actual PNG integrity, Unicode job/output, ошибки и cancel. **Агент не запускал сборки/тесты/Resolve.** [Полная Windows-сборка и запуск](WINDOWS_CADENCE_APP.md).

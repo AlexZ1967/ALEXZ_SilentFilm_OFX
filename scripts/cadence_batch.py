@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import uuid
+from cadence_platform import atomic_replace
 
 
 class BatchQueue:
@@ -54,4 +55,4 @@ class BatchQueue:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps({"schema": 1, "index": self.index, "stopped": self.stopped,
                                           "settings": self.settings, "clips": self.entries}, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        atomic_replace(temporary, self.path)

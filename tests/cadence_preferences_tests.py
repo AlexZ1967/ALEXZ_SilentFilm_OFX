@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 spec = importlib.util.spec_from_file_location("cadence_preferences", Path(__file__).resolve().parents[1] / "scripts/cadence_preferences.py")
 preferences = importlib.util.module_from_spec(spec)

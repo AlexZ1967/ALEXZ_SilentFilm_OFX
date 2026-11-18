@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
 import math
+import os
 from pathlib import Path
 import re
 import uuid
 import xml.etree.ElementTree as ET
+from cadence_platform import atomic_replace
 
 
 PLUGIN_ID = b"com.alexz.silentfilm.crankexposure"
@@ -94,8 +96,10 @@ def one(fields, number, wire):
 
 class Zstd:
     def __init__(self):
-        name = ctypes.util.find_library("zstd")
-        require(name, "Для Color-пресета нужна системная libzstd (Debian/Ubuntu: libzstd1)")
+        bundled = Path(__file__).resolve().parents[1] / "bin/zstd.dll"
+        name = os.environ.get("SILENTFILM_ZSTD_LIBRARY") or (str(bundled) if os.name == "nt" and bundled.is_file()
+                else ctypes.util.find_library("zstd"))
+        require(name, "Для Color-пресета нужна libzstd: Windows — полная установка Cadence; Debian/Ubuntu — libzstd1")
         self.lib = ctypes.CDLL(name)
         for name, args, result in (
             ("ZSTD_getFrameContentSize", [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_ulonglong),
@@ -234,7 +238,7 @@ def generate_preset(template, map_path, output):
     destination = Path(output)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(document.replace(old_body, modified.hex(), 1), encoding="utf-8")
-    temporary.replace(destination)
+    atomic_replace(temporary, destination)
     return dict(metadata, map=path, preset=str(destination.resolve()),
                 template=str(Path(template).resolve()), template_sha256=hashlib.sha256(document.encode("utf-8")).hexdigest())
 

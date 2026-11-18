@@ -8,6 +8,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 spec = importlib.util.spec_from_file_location("frame_provider", Path(__file__).resolve().parents[1] / "scripts/cadence_frame_provider.py")
 provider = importlib.util.module_from_spec(spec)
@@ -29,7 +32,7 @@ def run(args):
         return payload
     def serve():
         try:
-            provider.serve_frames(directory, state, export)
+            provider.serve_frames(directory, state, export, transport=args.transport)
         except Exception as error:
             errors.append(error)
     worker = threading.Thread(target=serve, daemon=True)
@@ -40,19 +43,23 @@ def run(args):
             if errors or time.monotonic() > deadline:
                 raise RuntimeError("Frame provider did not become ready")
             time.sleep(0.02)
-        request = directory / "request.ini"
+        native_job = directory / "Каденс с пробелом"
+        native_job.mkdir()
+        request = native_job / "request.ini"
         request.write_text("schema=1\nprocessing=capture_rgb\nsource_mode=resolve_frames\n"
                            f"input={directory / 'frame_source.ini'}\n"
-                           "frame_count=100\nexpected_source_fps=25\noutput_fps=25\nformat=prores\ndevice=cpu\n"
+                           "output_name=Кино_cadence\nframe_count=100\nexpected_source_fps=25\noutput_fps=25\nformat=prores\ndevice=cpu\n"
                            "fps_min=1\nfps_max=1\nvariation=0\nirregularity=0\nshutter=0\nmotion_blur=0\n"
                            "samples=1\nshake=0\nexposure_link=0\n", encoding="utf-8")
         subprocess.run([args.helper, "--job", str(request)], check=True, timeout=60)
         worker.join(timeout=10)
         if worker.is_alive() or errors:
             raise RuntimeError("Frame provider did not terminate cleanly: " + str(errors))
-        result = dict(line.split("=", 1) for line in (directory / "result.ini").read_text().splitlines() if "=" in line)
+        result = dict(line.split("=", 1) for line in (native_job / "result.ini").read_text(encoding="utf-8").splitlines() if "=" in line)
         if result.get("frame_count") != "4" or result.get("source_mode") != "resolve_frames":
             raise RuntimeError("Direct frame source changed cadence duration")
+        if not (native_job / "Кино_cadence.mov").is_file():
+            raise RuntimeError("Unicode output name was lost")
         if not 1 <= len(exported) <= 9 or len(exported) != len(set(exported)):
             raise RuntimeError("Native source requested unnecessary or duplicate frames: " + str(exported))
         if (directory / "resolve_processed.mkv").exists():
@@ -77,7 +84,7 @@ def run(args):
     errors.clear()
     def serve_pixels():
         try:
-            provider.serve_frames(pixel_dir, dict(state), lambda index: images[index % 2])
+            provider.serve_frames(pixel_dir, dict(state), lambda index: images[index % 2], transport=args.transport)
         except Exception as error:
             errors.append(error)
     worker = threading.Thread(target=serve_pixels, daemon=True)
@@ -104,7 +111,7 @@ def run(args):
         raise RuntimeError("Injected Resolve export failure")
     def fail_serve():
         try:
-            provider.serve_frames(failed_dir, dict(state), fail_export)
+            provider.serve_frames(failed_dir, dict(state), fail_export, transport=args.transport)
         except Exception as error:
             errors.append(error)
     worker = threading.Thread(target=fail_serve, daemon=True)
@@ -116,7 +123,7 @@ def run(args):
                 raise RuntimeError("Error provider did not become ready")
             time.sleep(0.02)
         failure_request = failed_dir / "request.ini"
-        failure_request.write_text(request.read_text().replace(str(directory / "frame_source.ini"), str(failed_dir / "frame_source.ini")))
+        failure_request.write_text(request.read_text(encoding="utf-8").replace(str(directory / "frame_source.ini"), str(failed_dir / "frame_source.ini")), encoding="utf-8")
         failure = subprocess.run([args.helper, "--job", str(failure_request)], capture_output=True, text=True, timeout=30)
         worker.join(timeout=10)
         if failure.returncode == 0 or "Injected Resolve export failure" not in failure.stderr or worker.is_alive():
@@ -136,4 +143,5 @@ if __name__ == "__main__":
     parser.add_argument("--media-test", required=True)
     parser.add_argument("--ffmpeg", required=True)
     parser.add_argument("--root", required=True)
+    parser.add_argument("--transport", choices=("tcp", "unix_abstract"))
     run(parser.parse_args())

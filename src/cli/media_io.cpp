@@ -1,3 +1,4 @@
+#include "frame_socket.hpp"
 #include "media_io.hpp"
 
 extern "C" {
@@ -26,10 +27,6 @@ extern "C" {
 #include <cerrno>
 #include <cstring>
 #include <chrono>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
 
 namespace silentfilm::offline {
 namespace {
@@ -116,28 +113,14 @@ struct VideoReader::Impl {
     std::deque<Raw> raw;
     std::map<std::int64_t, std::weak_ptr<const SourceFrame>> converted;
     std::vector<std::uint16_t> rgba;
-    int remote = -1;
+    FrameSocket remote;
     std::int64_t remoteCount = 0;
     FrameReadStats remoteStats;
 
-    ~Impl() { if(remote>=0) ::close(remote); sws_freeContext(scaler); av_packet_free(&packet); avcodec_free_context(&codec); avformat_close_input(&format); }
+    ~Impl() { sws_freeContext(scaler); av_packet_free(&packet); avcodec_free_context(&codec); avformat_close_input(&format); }
 
     void transfer(void* data, std::size_t bytes, bool sending) {
-        auto* position = static_cast<unsigned char*>(data);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(5);
-        while(bytes) {
-            if(cancelled()) throw std::runtime_error("Cancelled");
-            if(std::chrono::steady_clock::now()>deadline) throw std::runtime_error("Resolve frame request timed out");
-            pollfd descriptor{remote, static_cast<short>(sending ? POLLOUT : POLLIN), 0};
-            const int ready = ::poll(&descriptor,1,200);
-            if(ready<0 && errno==EINTR) continue;
-            if(ready<0) throw std::runtime_error("Resolve frame socket poll failed");
-            if(!ready) continue;
-            const auto amount = sending ? ::send(remote,position,bytes,MSG_NOSIGNAL) : ::recv(remote,position,bytes,0);
-            if(amount<0 && errno==EINTR) continue;
-            if(amount<=0) throw std::runtime_error("Resolve frame provider disconnected; see resolve_frames.log");
-            position+=amount;bytes-=static_cast<std::size_t>(amount);
-        }
+        remote.transfer(data, bytes, sending, cancelled);
     }
 
     void fetchRemote(std::int64_t index) {
@@ -180,7 +163,7 @@ struct VideoReader::Impl {
     }
 
     void openRemote(const std::string& path) {
-        std::ifstream input(path);
+        std::ifstream input(std::filesystem::u8path(path));
         std::string line;
         if(!std::getline(input,line) || line!="SILENTFILM_FRAME_SOURCE_V1")throw std::runtime_error("Invalid frame source metadata");
         std::map<std::string,std::string> values;
@@ -190,17 +173,18 @@ struct VideoReader::Impl {
         }
         width=std::stoi(values.at("width"));height=std::stoi(values.at("height"));fps=std::stod(values.at("fps"));
         remoteCount=std::stoll(values.at("frame_count"));
-        const auto name=values.at("socket_name"),token=values.at("token");
-        sockaddr_un address{};address.sun_family=AF_UNIX;
+        const auto token=values.at("token");
         if(width<=0||height<=0||width>32768||height>32768||!std::isfinite(fps)||fps<=0||remoteCount<=0||remoteCount>1000000000
-            ||name.empty()||name.size()+1>sizeof(address.sun_path)||token.size()!=64)
-            throw std::runtime_error("Invalid Resolve frame source configuration");
-        remote=::socket(AF_UNIX,SOCK_STREAM,0);
-        if(remote<0)throw std::runtime_error("Cannot create Resolve frame socket");
-        // Linux abstract socket avoids the 108-byte limit for project directory paths.
-        std::memcpy(address.sun_path+1,name.data(),name.size());
-        if(::connect(remote,reinterpret_cast<sockaddr*>(&address),offsetof(sockaddr_un,sun_path)+1+name.size())<0)
-            throw std::runtime_error("Resolve frame provider is unavailable; start a new capture");
+            ||token.size()!=64) throw std::runtime_error("Invalid Resolve frame source configuration");
+        const auto transport=values.count("transport") ? values.at("transport") : "unix_abstract";
+        if(transport=="tcp") {
+            if(values.at("socket_host")!="127.0.0.1") throw std::runtime_error("Frame source must use loopback");
+            std::size_t consumed=0;
+            const int port=std::stoi(values.at("socket_port"), &consumed);
+            if(consumed!=values.at("socket_port").size()) throw std::runtime_error("Invalid frame source port");
+            remote.loopback(port,cancelled);
+        } else if(transport=="unix_abstract") remote.abstract(values.at("socket_name"),cancelled);
+        else throw std::runtime_error("Unknown frame source transport");
         transfer(const_cast<char*>(token.data()),token.size(),true);
         char acknowledgement[4];transfer(acknowledgement,4,false);
         if(std::string(acknowledgement,4)!="SF01")throw std::runtime_error("Resolve frame provider authentication failed");
@@ -431,12 +415,12 @@ struct FrameWriter::Impl {
         rgba.resize(static_cast<std::size_t>(width) * height * 4);
         if (format == "tiff") {
             if (!std::filesystem::create_directory(directory / "frames")) throw std::runtime_error("Output frames directory already exists");
-            path = directory / "frames" / (tiffPrefix + "%08d.tif"); return;
+            path = directory / "frames" / std::filesystem::u8path(tiffPrefix + "%08d.tif"); return;
         }
         if (format != "prores") throw std::runtime_error("Output format must be prores or tiff");
-        path = directory / (movieName + ".mov");
+        path = directory / std::filesystem::u8path(movieName + ".mov");
         if (std::filesystem::exists(path)) throw std::runtime_error("Output movie already exists");
-        check(avformat_alloc_output_context2(&container, nullptr, "mov", path.c_str()), "Create MOV output");
+        check(avformat_alloc_output_context2(&container, nullptr, "mov", path.u8string().c_str()), "Create MOV output");
         const auto* encoder = avcodec_find_encoder_by_name("prores_ks");
         if (!encoder) throw std::runtime_error("FFmpeg prores_ks encoder is unavailable; select TIFF output");
         codec = avcodec_alloc_context3(encoder); if (!codec) throw std::bad_alloc();
@@ -454,7 +438,7 @@ struct FrameWriter::Impl {
         stream->sample_aspect_ratio = codec->sample_aspect_ratio;
         check(avcodec_parameters_from_context(stream->codecpar, codec), "Set MOV video parameters");
         stream->time_base = codec->time_base; stream->avg_frame_rate = codec->framerate;
-        check(avio_open(&container->pb, path.c_str(), AVIO_FLAG_WRITE), "Open MOV output");
+        check(avio_open(&container->pb, path.u8string().c_str(), AVIO_FLAG_WRITE), "Open MOV output");
         check(avformat_write_header(container, nullptr), "Write MOV header");
         encoded->format = codec->pix_fmt; encoded->width = width; encoded->height = height;
         encoded->sample_aspect_ratio = codec->sample_aspect_ratio;
@@ -496,7 +480,7 @@ void FrameWriter::write(const std::vector<Pixel>& pixels, std::int64_t index)
     }
     if (p.format == "tiff") {
         std::ostringstream name; name << p.tiffPrefix << std::setw(8) << std::setfill('0') << index << ".tif";
-        tiff(p.directory / "frames" / name.str(), p.width, p.height, p.rgba, p.aspect); return;
+        tiff(p.directory / "frames" / std::filesystem::u8path(name.str()), p.width, p.height, p.rgba, p.aspect); return;
     }
     check(av_frame_make_writable(p.encoded.get()), "Reuse ProRes image");
     const std::uint8_t* planes[4]{reinterpret_cast<const std::uint8_t*>(p.rgba.data()), nullptr, nullptr, nullptr};

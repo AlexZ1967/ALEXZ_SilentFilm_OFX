@@ -30,6 +30,9 @@
 #include <string>
 #include <thread>
 #include <utility>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
 namespace fs = std::filesystem;
@@ -64,7 +67,7 @@ Values readSettings(const fs::path& path)
 
 void atomicValues(const fs::path& path, const Values& values)
 {
-    const auto temporary = fs::path(path.string() + ".tmp");
+    auto temporary = path; temporary += ".tmp";
     std::ofstream out(temporary, std::ios::trunc);
     out.exceptions(std::ios::failbit | std::ios::badbit);
     for (const auto& [key, value] : values) {
@@ -72,7 +75,18 @@ void atomicValues(const fs::path& path, const Values& values)
         std::replace(safe.begin(), safe.end(), '\n', ' '); std::replace(safe.begin(), safe.end(), '\r', ' ');
         out << key << '=' << safe << '\n';
     }
-    out.close(); fs::rename(temporary, path);
+    out.close();
+#ifdef _WIN32
+    for (int attempt = 0; ; ++attempt) {
+        if (MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) break;
+        const auto error = GetLastError();
+        if (attempt == 100 || (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION))
+            throw std::runtime_error("Cannot publish job status (Win32 " + std::to_string(error) + ")");
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+#else
+    fs::rename(temporary, path);
+#endif
 }
 
 std::string number(double value)
@@ -161,7 +175,7 @@ Settings parse(Values values)
     const auto sourceMode=get("source_mode","video");
     if(sourceMode!="video" && sourceMode!="resolve_frames")throw std::runtime_error("Unknown source_mode");
     s.frameProvider=sourceMode=="resolve_frames";
-    if (s.input.empty() || !fs::is_regular_file(s.input)) throw std::runtime_error("Input must be a regular local media file");
+    if (s.input.empty() || !fs::is_regular_file(fs::u8path(s.input))) throw std::runtime_error("Input must be a regular local media file");
     s.format = get("format", "prores"); s.device = get("device", "cuda");
     if (s.format != "prores" && s.format != "tiff") throw std::runtime_error("Select prores or tiff output");
     if (s.device != "cuda" && s.device != "cpu") throw std::runtime_error("Select cuda or cpu backend");
@@ -533,15 +547,15 @@ void render(Job& job, const Settings& s)
     job.update("finishing", "Завершение файла");
     writer.finish(); map.close();
     const auto exposurePath = fs::absolute(job.directory / "exposure.sfexposure");
-    writeCrankExposureMap(exposurePath.string(), s.outputFps, exposureGains, !s.exposureViaOfx);
+    writeCrankExposureMap(exposurePath.u8string(), s.outputFps, exposureGains, !s.exposureViaOfx);
     if (job.cancelled()) throw std::runtime_error("Cancelled");
     if (writer.written() != written) throw std::runtime_error("Encoder did not finish all physical captures");
     job.status["frames_written"] = std::to_string(written);
     Values result = job.status;
     result["state"] = "complete"; result["input"] = s.input; result["format"] = writer.format();
-    result["media_path"] = fs::absolute(writer.mediaPath()).string();
+    result["media_path"] = fs::absolute(writer.mediaPath()).u8string();
     result["exposure_mode"] = s.exposureViaOfx ? "ofx" : "bake";
-    result["exposure_map_path"] = exposurePath.string();
+    result["exposure_map_path"] = exposurePath.u8string();
     result["exposure_ofx_id"] = "com.alexz.silentfilm.crankexposure";
     result["frame_count"] = std::to_string(written); result["first_index"] = "0";
     result["last_index"] = std::to_string(written - 1); result["source_start_frame"] = std::to_string(s.start);
@@ -575,7 +589,7 @@ void render(Job& job, const Settings& s)
 
 } // namespace
 
-int main(int argc, char** argv)
+int cadenceMain(int argc, char** argv)
 {
     std::signal(SIGINT, signalHandler); std::signal(SIGTERM, signalHandler);
     if (argc == 2 && std::string(argv[1]) == "--capabilities") {
@@ -604,7 +618,7 @@ int main(int argc, char** argv)
         std::cerr << "Usage: silentfilm_cadence --job /absolute/job/request.ini\n";
         return argc == 2 && std::string(argv[1]) == "--help" ? 0 : 2;
     }
-    const auto request = fs::absolute(argv[2]);
+    const auto request = fs::absolute(fs::u8path(argv[2]));
     Job job(request.parent_path());
     const auto lock = job.directory / "running.lock";
     bool ownedLock = false;
@@ -625,3 +639,18 @@ int main(int argc, char** argv)
         return job.cancelled() ? 130 : 1;
     }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv)
+{
+    SetConsoleOutputCP(CP_UTF8);
+    std::vector<std::string> arguments;
+    arguments.reserve(argc);
+    for (int i = 0; i < argc; ++i) arguments.push_back(fs::path(argv[i]).u8string());
+    std::vector<char*> pointers;
+    for (auto& argument : arguments) pointers.push_back(argument.data());
+    return cadenceMain(argc, pointers.data());
+}
+#else
+int main(int argc, char** argv) { return cadenceMain(argc, argv); }
+#endif

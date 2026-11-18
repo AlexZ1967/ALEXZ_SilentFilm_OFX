@@ -8,21 +8,27 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dirent.h>
-#include <fcntl.h>
 #include <iomanip>
 #include <locale>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#ifdef _WIN32
+#include "user_presets_windows_io.hpp"
+#else
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 namespace silentfilm {
 namespace {
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+#ifndef _WIN32
 [[noreturn]] void fileError(const char* message) { throw std::runtime_error(std::string(message) + ": " + std::strerror(errno)); }
+#endif
 
 std::string join(const std::string& parent, const std::string& child)
 {
@@ -32,6 +38,9 @@ std::string join(const std::string& parent, const std::string& child)
 
 void ensureDirectories(const std::string& path)
 {
+#ifdef _WIN32
+    preset_windows::directories(path);
+#else
     for (std::size_t i = 1; i <= path.size(); ++i) {
         if (i < path.size() && path[i] != '/') continue;
         const auto part = path.substr(0, i);
@@ -40,6 +49,7 @@ void ensureDirectories(const std::string& path)
         if (::stat(part.c_str(), &info) != 0) fileError("Не удалось проверить папку пресетов");
         require(S_ISDIR(info.st_mode), "Вместо папки пресетов найден файл");
     }
+#endif
 }
 
 void validateValues(const UserPreset& preset)
@@ -53,6 +63,7 @@ void validateValues(const UserPreset& preset)
     }
 }
 
+#ifndef _WIN32
 struct File {
     int descriptor = -1;
     explicit File(int value) : descriptor(value) {}
@@ -62,15 +73,20 @@ struct File {
 struct DirectoryCloser {
     void operator()(DIR* directory) const noexcept { if (directory) ::closedir(directory); }
 };
+#endif
 } // namespace
 
 std::string userPresetRoot()
 {
+#ifdef _WIN32
+    return preset_windows::root();
+#else
     if (const char* path = std::getenv("XDG_DATA_HOME"); path && *path == '/')
         return join(path, "ALEXZSilentFilm/ofx-presets");
     const char* home = std::getenv("HOME");
     require(home && *home == '/', "Не удалось определить пользовательскую папку пресетов");
     return join(home, ".local/share/ALEXZSilentFilm/ofx-presets");
+#endif
 }
 
 void validateUserPresetName(const std::string& name)
@@ -80,6 +96,14 @@ void validateUserPresetName(const std::string& name)
     for (const unsigned char c : name)
         require(c >= 32 && c != 127 && std::string("/\\<>:\"|?*").find(static_cast<char>(c)) == std::string::npos,
             "В имени пресета нельзя использовать разделители пути и служебные символы");
+#ifdef _WIN32
+    (void)preset_windows::wide(name);
+    auto base = name.substr(0, name.find('.'));
+    for (auto& c : base) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    require(base != "CON" && base != "PRN" && base != "AUX" && base != "NUL"
+        && !(base.size() == 4 && (base.compare(0, 3, "COM") == 0 || base.compare(0, 3, "LPT") == 0)
+            && base[3] >= '1' && base[3] <= '9'), "Имя зарезервировано Windows");
+#endif
 }
 
 std::string userPresetPath(const std::string& root, const std::string& effect, const std::string& name)
@@ -91,7 +115,7 @@ std::string userPresetPath(const std::string& root, const std::string& effect, c
 std::string userPresetFileName(const std::string& path)
 {
     require(path.find('\0') == std::string::npos, "Некорректный путь пресета");
-    const auto separator = path.find_last_of('/');
+    const auto separator = path.find_last_of("/\\");
     const auto file = path.substr(separator == std::string::npos ? 0 : separator + 1);
     constexpr std::size_t suffixSize = 9;
     require(file.size() > suffixSize && file.compare(file.size() - suffixSize, suffixSize, ".sfpreset") == 0,
@@ -105,10 +129,15 @@ std::vector<std::string> listUserPresets(const std::string& root, const std::str
 {
     validateUserPresetName(effect);
     const auto folder = join(root, effect);
+    std::vector<std::string> names;
+#ifdef _WIN32
+    for (const auto& file : preset_windows::files(folder)) {
+        try { names.push_back(userPresetFileName(file)); } catch (const std::runtime_error&) {}
+    }
+#else
     DIR* raw = ::opendir(folder.c_str());
     if (!raw) { if (errno == ENOENT) return {}; fileError("Не удалось прочитать библиотеку пресетов"); }
     const std::unique_ptr<DIR, DirectoryCloser> directory(raw);
-    std::vector<std::string> names;
     while (true) {
         errno = 0;
         const auto* entry = ::readdir(directory.get());
@@ -118,6 +147,7 @@ std::vector<std::string> listUserPresets(const std::string& root, const std::str
         if (::lstat(file.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) continue;
         try { names.push_back(userPresetFileName(file)); } catch (const std::runtime_error&) {}
     }
+#endif
     std::sort(names.begin(), names.end());
     return names;
 }
@@ -136,8 +166,16 @@ void saveUserPreset(const std::string& root, const UserPreset& preset)
     require(static_cast<bool>(output) && data.size() <= 65536, "Не удалось сформировать пользовательский пресет");
     ensureDirectories(join(root, preset.effect));
     static std::atomic<unsigned long long> sequence{0};
-    const auto temporary = destination + ".tmp-" + std::to_string(::getpid()) + "-"
+#ifdef _WIN32
+    const auto process = GetCurrentProcessId();
+#else
+    const auto process = ::getpid();
+#endif
+    const auto temporary = destination + ".tmp-" + std::to_string(process) + "-"
         + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(sequence.fetch_add(1));
+#ifdef _WIN32
+    preset_windows::write(destination, temporary, data);
+#else
     File file(::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600));
     if (file.descriptor < 0) fileError("Не удалось создать файл пресета");
     try {
@@ -153,6 +191,7 @@ void saveUserPreset(const std::string& root, const UserPreset& preset)
         if (::close(descriptor) != 0) fileError("Не удалось завершить запись пресета");
         if (::rename(temporary.c_str(), destination.c_str()) != 0) fileError("Не удалось сохранить пресет");
     } catch (...) { ::unlink(temporary.c_str()); throw; }
+#endif
 }
 
 UserPreset loadUserPreset(const std::string& root, const std::string& effect, const std::string& name)
@@ -164,6 +203,9 @@ UserPreset loadUserPresetFile(const std::string& path, const std::string& effect
 {
     const auto name = userPresetFileName(path);
     validateUserPresetName(effect);
+#ifdef _WIN32
+    const auto data = preset_windows::read(path);
+#else
     File file(::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK));
     if (file.descriptor < 0) fileError("Не удалось открыть пресет");
     struct stat info{};
@@ -180,6 +222,7 @@ UserPreset loadUserPresetFile(const std::string& path, const std::string& effect
         data.append(buffer, static_cast<std::size_t>(count));
         require(data.size() <= 65536, "Пресет превышает допустимый размер");
     }
+#endif
     std::istringstream input(data);
     input.imbue(std::locale::classic());
     std::string magic;

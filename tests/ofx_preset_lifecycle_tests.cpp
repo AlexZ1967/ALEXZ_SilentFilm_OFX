@@ -164,43 +164,44 @@ int main(int argc, char** argv)
                 "Old Defects presets must keep Legacy development when new controls are missing");
         }
         fixture::params.at("user_preset_name").text = "Моя оптика";
-        userPresetChanged(effect, state, "save_user_preset", 12, root.string());
-        const auto file = root / "com.alexz.silentfilm.cameraoptics" / "Моя оптика.sfpreset";
+        userPresetChanged(effect, state, "save_user_preset", 12, root.u8string());
+        const auto file = root / "com.alexz.silentfilm.cameraoptics" / std::filesystem::u8path("Моя оптика.sfpreset");
         fixture::check(std::filesystem::is_regular_file(file), "Camera Optics Save with a Russian name did not write its file");
         fixture::check(fixture::artisticPropertyReads == 0 && fixture::optionWrites == 1 && fixture::resetCalls == 0
             && fixture::labels.size() == 2 && fixture::labels[1] == "Моя оптика",
             "Save must publish selectable names without introspecting artistic metadata or resetting choices");
-        fixture::check(fixture::numericWrites == 0 && fixture::params.at("user_preset_file").text == file.string(),
+        fixture::check(fixture::numericWrites == 0 && fixture::params.at("user_preset_file").text
+            == silentfilm::userPresetPath(root.u8string(), "com.alexz.silentfilm.cameraoptics", "Моя оптика"),
             "Save must only update string UI fields and retain the exact Unicode path");
-        const auto saved = silentfilm::loadUserPresetFile(file.string(), "com.alexz.silentfilm.cameraoptics");
+        const auto saved = silentfilm::loadUserPresetFile(file.u8string(), "com.alexz.silentfilm.cameraoptics");
         fixture::check(saved.values.size() == 7 && saved.name == "Моя оптика", "Typed Camera Optics snapshot lost parameters");
         fixture::params.at("user_preset").value = 1;
-        userPresetChanged(effect, state, "user_preset", 12, root.string());
+        userPresetChanged(effect, state, "user_preset", 12, root.u8string());
         fixture::check(fixture::params.at("user_preset_name").text == "Моя оптика"
-            && fixture::params.at("user_preset_file").text == file.string() && fixture::numericWrites == 0,
+            && fixture::params.at("user_preset_file").text == silentfilm::userPresetPath(root.u8string(), "com.alexz.silentfilm.cameraoptics", "Моя оптика") && fixture::numericWrites == 0,
             "Selecting a preset must assign its name/path without applying it");
         fixture::params.at("camera_softness").value = 0.7;
-        userPresetChanged(effect, state, "apply_user_preset", 12, root.string());
+        userPresetChanged(effect, state, "apply_user_preset", 12, root.u8string());
         fixture::check(fixture::params.at("camera_softness").value == 0.15 && fixture::edits == 1,
             "Apply must restore the snapshot in one edit");
-        userPresetChanged(effect, state, "refresh_user_presets", 12, root.string());
+        userPresetChanged(effect, state, "refresh_user_presets", 12, root.u8string());
         fixture::check(fixture::params.at("user_preset_catalog").text == "Моя оптика"
             && fixture::optionWrites == 2 && fixture::resetCalls == 0, "Refresh must publish selectable names without property reset");
         fixture::params.at("camera_softness").keys = 1;
         const auto writes = fixture::numericWrites;
-        userPresetChanged(effect, state, "apply_user_preset", 12, root.string());
+        userPresetChanged(effect, state, "apply_user_preset", 12, root.u8string());
         fixture::check(fixture::numericWrites == writes && fixture::params.at("user_preset_status").text.find("Ошибка:") == 0,
             "Animated targets must be rejected before any numeric write");
         auto second = saved; second.name = "Вторая оптика";
-        silentfilm::saveUserPreset(root.string(), second);
-        userPresetChanged(effect, state, "refresh_user_presets", 12, root.string());
+        silentfilm::saveUserPreset(root.u8string(), second);
+        userPresetChanged(effect, state, "refresh_user_presets", 12, root.u8string());
         fixture::check(fixture::labels.size() == 3, "New library file did not become selectable");
-        std::filesystem::remove(root / saved.effect / (second.name + ".sfpreset"));
-        userPresetChanged(effect, state, "refresh_user_presets", 12, root.string());
+        std::filesystem::remove(root / saved.effect / std::filesystem::u8path(second.name + ".sfpreset"));
+        userPresetChanged(effect, state, "refresh_user_presets", 12, root.u8string());
         fixture::check(fixture::labels.size() == 3 && fixture::labels[2] == "—" && state.userPresetNames.size() == 1,
             "Removed files must become neutral slots without changing host indices");
         fixture::params.at("user_preset").value = 2;
-        userPresetChanged(effect, state, "user_preset", 12, root.string());
+        userPresetChanged(effect, state, "user_preset", 12, root.u8string());
         fixture::check(fixture::params.at("user_preset_name").text == "Моя оптика", "A stale slot selected a different file");
         fixture::check(!state.editingUserPreset && fixture::resetCalls == 0, "Preset callback guard or choice lifetime failed");
         fixture::check(destroy(effect) == kOfxStatOK && !fixture::instanceData, "DestroyInstance did not clear state");

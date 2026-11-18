@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import uuid
+from cadence_platform import settings_root, atomic_replace
 
 
 class PreferenceStore:
@@ -20,7 +21,7 @@ class PreferenceStore:
         self.factory.update({key: spec[0] for key, spec in choices.items()})
         self.factory.update(flags)
         self.factory.update(self.texts)
-        root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        root = settings_root()
         self.path = Path(path) if path is not None else root / "ALEXZ" / "SilentFilm" / "cadence_settings.json"
         self.data = {"schema": 1, "current": deepcopy(self.factory), "presets": {}, "selected": None}
         self.warning = None
@@ -113,7 +114,7 @@ class PreferenceStore:
                 output.write("\n")
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, self.path)
+            atomic_replace(temporary, self.path)
         finally:
             Path(temporary).unlink(missing_ok=True)
         self.data = data

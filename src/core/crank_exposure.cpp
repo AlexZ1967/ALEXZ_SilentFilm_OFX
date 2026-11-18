@@ -8,6 +8,9 @@
 #include <iomanip>
 #include <locale>
 #include <stdexcept>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace silentfilm {
 
@@ -26,7 +29,11 @@ void writeCrankExposureMap(const std::string& path, double fps, const std::vecto
     if (!std::isfinite(fps) || fps < 1 || fps > 120 || gains.empty() || gains.size() > 10000000)
         throw std::runtime_error("Invalid Crank Exposure map timing");
     const auto temporary = path + ".tmp";
+#ifdef _WIN32
+    std::ofstream out(std::filesystem::u8path(temporary));
+#else
     std::ofstream out(temporary);
+#endif
     out.imbue(std::locale::classic());
     out.exceptions(std::ios::failbit | std::ios::badbit);
     out << std::setprecision(17) << "SILENTFILM_CRANK_EXPOSURE 1\n" << (baked ? "bake" : "ofx")
@@ -37,13 +44,23 @@ void writeCrankExposureMap(const std::string& path, double fps, const std::vecto
         out << i << ' ' << gains[i] << '\n';
     }
     out.close();
+#ifdef _WIN32
+    if (!MoveFileExW(std::filesystem::u8path(temporary).c_str(), std::filesystem::u8path(path).c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        throw std::runtime_error("Cannot replace Crank Exposure map (Win32 " + std::to_string(GetLastError()) + ")");
+#else
     std::filesystem::rename(temporary, path);
+#endif
 }
 
 CrankExposureMap readCrankExposureMap(const std::string& path)
 {
     if (path.empty()) throw std::runtime_error("Crank Exposure: выбери файл Exposure Map из результата Cadence");
+#ifdef _WIN32
+    std::ifstream in(std::filesystem::u8path(path));
+#else
     std::ifstream in(path);
+#endif
     in.imbue(std::locale::classic());
     if (!in) throw std::runtime_error("Crank Exposure: файл Exposure Map отсутствует или недоступен");
     std::string signature, mode;

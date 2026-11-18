@@ -11,6 +11,11 @@ import time
 import sys
 
 from cadence_resolve_bridge import cadence_name
+from cadence_platform import child_environment, detached_options, open_directory, resolve_python
+
+# PyGObject должен видеть DLL только своего GUI runtime, не каталог Resolve.
+if os.name == "nt" and hasattr(os, "add_dll_directory"):
+    _GTK_DLL_DIRECTORY = os.add_dll_directory(str(Path(sys.executable).parent))
 
 try:
     import gi
@@ -21,6 +26,7 @@ except (ImportError, ValueError) as error:
     raise SystemExit(
         "Для окна SilentFilm нужны GTK 4 / PyGObject / Pango.\n"
         "Debian/Ubuntu: sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0\n"
+        "Windows: MSYS2 UCRT64 и пакеты GTK4/python/python-gobject; см. WINDOWS_CADENCE_APP.md\n"
         f"Подробности: {error}"
     ) from None
 
@@ -45,14 +51,6 @@ def write_ini(path, values):
             raise ValueError("Путь или значение содержит перенос строки")
         rows.append(f"{key}={value}\n")
     Path(path).write_text("".join(rows), encoding="utf-8")
-
-
-def child_environment():
-    """Keep Conda and host-library overrides out of native child processes."""
-    environment = os.environ.copy()
-    for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHOME", "PYTHONPATH"):
-        environment.pop(name, None)
-    return environment
 
 
 def require_flow_support(helper, mode, raw=False, exposure_mode="bake"):
@@ -987,7 +985,7 @@ class Application:
             with (directory / "render.log").open("wb") as log:
                 self.process = subprocess.Popen([self.args.helper, "--job", str(directory / "request.ini")],
                                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                                env=child_environment(), start_new_session=True)
+                                                env=child_environment(), **detached_options())
         except Exception:
             # Ошибка запуска не должна оставлять окно в состоянии вечного расчёта.
             self.running_job = self.baking_job = None
@@ -1149,8 +1147,7 @@ class Application:
         directory = Path(self.job.get_text())
         if not self.job.get_text() or not directory.is_dir():
             raise RuntimeError("Сначала выбери задание")
-        subprocess.Popen(["xdg-open", str(directory.resolve())], env=child_environment(),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        open_directory(directory)
 
     def update_job(self):
         """Observe atomically published progress and detect native launch failures."""
@@ -1308,7 +1305,7 @@ def main():
     parser.add_argument("--helper", required=True)
     parser.add_argument("--root", required=True)
     parser.add_argument("--backend", choices=("cuda", "cpu"), default="cuda")
-    parser.add_argument("--resolve-python", default="/opt/resolve/bin/ResolvePython")
+    parser.add_argument("--resolve-python", default=resolve_python())
     args = parser.parse_args()
     application = Gtk.Application(application_id="com.alexz.silentfilm.cadence")
     def activate(application):

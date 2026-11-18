@@ -2,7 +2,18 @@ cmake_minimum_required(VERSION 3.20)
 project(ALEXZSilentFilmOFX VERSION 0.36.0 LANGUAGES CXX)
 
 option(SILENTFILM_ENABLE_CUDA "Собрать CUDA backend и тест сравнения CPU/CUDA" OFF)
-option(SILENTFILM_BUILD_CADENCE "Собрать нативный каденс и launcher отдельного окна (Linux)" ON)
+set(SILENTFILM_CADENCE_DEFAULT OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(SILENTFILM_CADENCE_DEFAULT ON)
+endif()
+option(SILENTFILM_BUILD_CADENCE "Собрать нативный каденс и launcher отдельного окна" ${SILENTFILM_CADENCE_DEFAULT})
+
+if(MSVC)
+    # В том числе тестовые targets и preset storage содержат строки UTF-8.
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>" "$<$<COMPILE_LANGUAGE:CXX>:/permissive->"
+        "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>")
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 set(OFX_SDK_ROOT "/opt/resolve/Developer/OpenFX" CACHE PATH "Корень установленного OpenFX SDK")
 find_path(OFX_INCLUDE_DIR ofxImageEffect.h
@@ -13,7 +24,7 @@ if(NOT OFX_INCLUDE_DIR)
 endif()
 
 find_path(FFTW3_INCLUDE_DIR fftw3.h DOC "Каталог заголовков FFTW3")
-find_library(FFTW3F_LIBRARY NAMES fftw3f DOC "Библиотека FFTW3 single precision")
+find_library(FFTW3F_LIBRARY NAMES fftw3f libfftw3f-3 fftw3f-3 DOC "Библиотека FFTW3 single precision")
 if(NOT FFTW3_INCLUDE_DIR OR NOT FFTW3F_LIBRARY)
     message(FATAL_ERROR "Не найдена FFTW3 single precision (fftw3.h и libfftw3f). Установите пакет разработки FFTW3 или задайте FFTW3_INCLUDE_DIR и FFTW3F_LIBRARY.")
 endif()
@@ -39,6 +50,9 @@ set_target_properties(silentfilm_core PROPERTIES
 add_library(silentfilm_preset_storage STATIC src/platform/user_presets.cpp)
 target_include_directories(silentfilm_preset_storage PUBLIC include)
 target_compile_features(silentfilm_preset_storage PUBLIC cxx_std_17)
+if(WIN32)
+    target_link_libraries(silentfilm_preset_storage PRIVATE shell32 ole32 uuid)
+endif()
 set_target_properties(silentfilm_preset_storage PROPERTIES
     POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 
@@ -46,6 +60,12 @@ add_library(ALEXZSilentFilm MODULE src/ofx/plugin.cpp)
 target_include_directories(ALEXZSilentFilm PRIVATE "${OFX_INCLUDE_DIR}")
 target_link_libraries(ALEXZSilentFilm PRIVATE silentfilm_core silentfilm_preset_storage)
 target_compile_features(ALEXZSilentFilm PRIVATE cxx_std_17)
+
+# Standalone phase-0 diagnostic bundle. It deliberately has its own plugin ID
+# and binary so Resolve can scan it independently from the production effects.
+add_library(TemporalProbe MODULE src/ofx/temporal_probe.cpp)
+target_include_directories(TemporalProbe PRIVATE "${OFX_INCLUDE_DIR}")
+target_compile_features(TemporalProbe PRIVATE cxx_std_17)
 
 if(SILENTFILM_ENABLE_CUDA)
     if(APPLE)
@@ -62,11 +82,16 @@ if(SILENTFILM_ENABLE_CUDA)
     set_source_files_properties(src/cuda/emulsion.cu src/cuda/defects.cu PROPERTIES COMPILE_OPTIONS "--fmad=false")
     target_link_libraries(silentfilm_cuda PUBLIC silentfilm_core)
     target_include_directories(silentfilm_cuda PUBLIC include)
-    target_link_libraries(silentfilm_cuda PUBLIC CUDA::cufft_static)
-    if(TARGET CUDA::nvJitLink_static)
-        target_link_libraries(silentfilm_cuda PUBLIC CUDA::nvJitLink_static)
+    if(WIN32)
+        # Статическая cuFFT/cuLIBOS поставляется только для Linux.
+        target_link_libraries(silentfilm_cuda PUBLIC CUDA::cufft)
+    else()
+        target_link_libraries(silentfilm_cuda PUBLIC CUDA::cufft_static CUDA::culibos)
+        if(TARGET CUDA::nvJitLink_static)
+            target_link_libraries(silentfilm_cuda PUBLIC CUDA::nvJitLink_static)
+        endif()
     endif()
-    target_link_libraries(silentfilm_cuda PUBLIC CUDA::culibos CUDA::cudart_static CUDA::cuda_driver Threads::Threads ${CMAKE_DL_LIBS})
+    target_link_libraries(silentfilm_cuda PUBLIC CUDA::cudart_static CUDA::cuda_driver Threads::Threads ${CMAKE_DL_LIBS})
     set_target_properties(silentfilm_cuda PROPERTIES
         POSITION_INDEPENDENT_CODE ON
         CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON
@@ -93,6 +118,7 @@ endif()
 # Linux допускает unresolved symbols в MODULE; не выдаём такой OFX за готовый bundle.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ALEXZSilentFilm PRIVATE "LINKER:-z,defs")
+    target_link_options(TemporalProbe PRIVATE "LINKER:-z,defs")
 endif()
 
 set(OFX_BUNDLE "${CMAKE_BINARY_DIR}/ofx/ALEXZSilentFilm.ofx.bundle")
@@ -107,7 +133,19 @@ foreach(configuration DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         RUNTIME_OUTPUT_DIRECTORY_${configuration} "${OFX_BUNDLE}/Contents/${OFX_BINARY_DIRECTORY}")
 endforeach()
 
-foreach(target silentfilm_core ALEXZSilentFilm)
+set(TEMPORAL_PROBE_BUNDLE "${CMAKE_BINARY_DIR}/ofx/TemporalProbe.ofx.bundle")
+set_target_properties(TemporalProbe PROPERTIES
+    PREFIX "" SUFFIX ".ofx"
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
+    LIBRARY_OUTPUT_DIRECTORY "${TEMPORAL_PROBE_BUNDLE}/Contents/${OFX_BINARY_DIRECTORY}"
+    RUNTIME_OUTPUT_DIRECTORY "${TEMPORAL_PROBE_BUNDLE}/Contents/${OFX_BINARY_DIRECTORY}")
+foreach(configuration DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(TemporalProbe PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY_${configuration} "${TEMPORAL_PROBE_BUNDLE}/Contents/${OFX_BINARY_DIRECTORY}"
+        RUNTIME_OUTPUT_DIRECTORY_${configuration} "${TEMPORAL_PROBE_BUNDLE}/Contents/${OFX_BINARY_DIRECTORY}")
+endforeach()
+
+foreach(target silentfilm_core ALEXZSilentFilm TemporalProbe)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
     else()
@@ -116,14 +154,18 @@ foreach(target silentfilm_core ALEXZSilentFilm)
 endforeach()
 
 if(SILENTFILM_BUILD_CADENCE)
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        message(FATAL_ERROR "Offline Cadence пока подготовлен только для Linux. Для OFX без этой утилиты задайте SILENTFILM_BUILD_CADENCE=OFF.")
-    endif()
-    find_package(PkgConfig REQUIRED)
     find_package(Threads REQUIRED)
-    pkg_check_modules(CADENCE_FFMPEG REQUIRED IMPORTED_TARGET
-        libavformat>=58 libavcodec>=58 libavutil>=56 libswscale>=5)
-    find_package(OpenCV QUIET COMPONENTS core imgproc video)
+    if(WIN32)
+        include(cmake/WindowsCadenceMedia.cmake)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(CADENCE_FFMPEG REQUIRED IMPORTED_TARGET
+            libavformat>=58 libavcodec>=58 libavutil>=56 libswscale>=5)
+        set(CADENCE_MEDIA_TARGET PkgConfig::CADENCE_FFMPEG)
+        find_package(OpenCV QUIET COMPONENTS core imgproc video)
+    else()
+        message(FATAL_ERROR "Cadence подготовлен для Linux и Windows x64.")
+    endif()
     add_executable(silentfilm_cadence src/cli/cadence_main.cpp src/cli/media_io.cpp src/cli/flow_sampler.cpp)
     if(OpenCV_FOUND)
         target_compile_definitions(silentfilm_cadence PRIVATE SILENTFILM_CADENCE_OPENCV=1)
@@ -132,9 +174,13 @@ if(SILENTFILM_BUILD_CADENCE)
     else()
         message(WARNING "OpenCV core/imgproc/video не найдены: Cadence поддержит только simple. Для optical flow установите libopencv-dev и повторите CMake.")
     endif()
-    target_link_libraries(silentfilm_cadence PRIVATE silentfilm_core PkgConfig::CADENCE_FFMPEG Threads::Threads)
+    target_link_libraries(silentfilm_cadence PRIVATE silentfilm_core ${CADENCE_MEDIA_TARGET} Threads::Threads)
     target_compile_features(silentfilm_cadence PRIVATE cxx_std_17)
-    target_compile_options(silentfilm_cadence PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
+    if(MSVC)
+        target_compile_options(silentfilm_cadence PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W4>")
+    else()
+        target_compile_options(silentfilm_cadence PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>")
+    endif()
     set_target_properties(silentfilm_cadence PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     foreach(configuration DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         set_target_properties(silentfilm_cadence PROPERTIES RUNTIME_OUTPUT_DIRECTORY_${configuration} "${CMAKE_BINARY_DIR}/bin")
@@ -150,11 +196,13 @@ if(SILENTFILM_BUILD_CADENCE)
     else()
         set(SILENTFILM_CADENCE_DEFAULT_BACKEND "cpu")
     endif()
-    configure_file(scripts/SilentFilm_Cadence.lua.in "${CMAKE_BINARY_DIR}/scripts/SilentFilm_Cadence.lua" @ONLY)
-    configure_file(scripts/SilentFilm_Cadence_App.sh.in "${CMAKE_BINARY_DIR}/bin/SilentFilm_Cadence_App" @ONLY)
-    configure_file(scripts/SilentFilm_Cadence.py.in "${CMAKE_BINARY_DIR}/scripts/SilentFilm Cadence.py" @ONLY)
-    file(CHMOD "${CMAKE_BINARY_DIR}/bin/SilentFilm_Cadence_App"
-        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    if(NOT WIN32)
+        configure_file(scripts/SilentFilm_Cadence.lua.in "${CMAKE_BINARY_DIR}/scripts/SilentFilm_Cadence.lua" @ONLY)
+        configure_file(scripts/SilentFilm_Cadence_App.sh.in "${CMAKE_BINARY_DIR}/bin/SilentFilm_Cadence_App" @ONLY)
+        configure_file(scripts/SilentFilm_Cadence.py.in "${CMAKE_BINARY_DIR}/scripts/SilentFilm Cadence.py" @ONLY)
+        file(CHMOD "${CMAKE_BINARY_DIR}/bin/SilentFilm_Cadence_App"
+            PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    endif()
 endif()
 
 include(CTest)
@@ -246,8 +294,15 @@ if(BUILD_TESTING)
                 set_tests_properties(silentfilm_cadence_flow_cuda_parity PROPERTIES SKIP_RETURN_CODE 77)
             endif()
         endif()
-        find_program(SILENTFILM_TEST_PYTHON python3 PATHS /usr/bin NO_DEFAULT_PATH)
+        if(WIN32)
+            find_program(SILENTFILM_TEST_PYTHON NAMES python.exe python3.exe HINTS "C:/msys64/ucrt64/bin")
+        else()
+            find_program(SILENTFILM_TEST_PYTHON python3 PATHS /usr/bin NO_DEFAULT_PATH)
+        endif()
         if(SILENTFILM_TEST_PYTHON)
+            add_test(NAME silentfilm_cadence_platform COMMAND "${SILENTFILM_TEST_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/cadence_platform_tests.py")
+            set_tests_properties(silentfilm_cadence_platform PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
             add_test(NAME silentfilm_cadence_color_preset COMMAND "${SILENTFILM_TEST_PYTHON}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/cadence_color_preset_tests.py")
             set_tests_properties(silentfilm_cadence_color_preset PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
@@ -269,8 +324,10 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/cadence_cache_tests.py")
             set_tests_properties(silentfilm_cadence_cache PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
         endif()
-        find_program(SILENTFILM_TEST_FFMPEG ffmpeg PATHS /usr/bin NO_DEFAULT_PATH)
-        find_program(SILENTFILM_TEST_FFPROBE ffprobe PATHS /usr/bin NO_DEFAULT_PATH)
+        if(NOT WIN32)
+            find_program(SILENTFILM_TEST_FFMPEG ffmpeg PATHS /usr/bin NO_DEFAULT_PATH)
+            find_program(SILENTFILM_TEST_FFPROBE ffprobe PATHS /usr/bin NO_DEFAULT_PATH)
+        endif()
         if(SILENTFILM_TEST_FFMPEG AND SILENTFILM_TEST_FFPROBE)
             if(SILENTFILM_TEST_PYTHON)
                 add_test(NAME silentfilm_frame_provider COMMAND "${SILENTFILM_TEST_PYTHON}"
@@ -279,10 +336,16 @@ if(BUILD_TESTING)
                     --helper "$<TARGET_FILE:silentfilm_cadence>" --ffmpeg "${SILENTFILM_TEST_FFMPEG}"
                     --root "${CMAKE_BINARY_DIR}/cadence-artifacts")
                 set_tests_properties(silentfilm_frame_provider PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+                add_test(NAME silentfilm_frame_provider_tcp COMMAND "${SILENTFILM_TEST_PYTHON}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/frame_provider_tests.py"
+                    --media-test "$<TARGET_FILE:silentfilm_media_io_tests>"
+                    --helper "$<TARGET_FILE:silentfilm_cadence>" --ffmpeg "${SILENTFILM_TEST_FFMPEG}"
+                    --root "${CMAKE_BINARY_DIR}/cadence-artifacts" --transport tcp)
+                set_tests_properties(silentfilm_frame_provider_tcp PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
             endif()
             add_executable(silentfilm_media_io_tests tests/media_io_tests.cpp src/cli/media_io.cpp)
             target_include_directories(silentfilm_media_io_tests PRIVATE src/cli)
-            target_link_libraries(silentfilm_media_io_tests PRIVATE silentfilm_core PkgConfig::CADENCE_FFMPEG Threads::Threads)
+            target_link_libraries(silentfilm_media_io_tests PRIVATE silentfilm_core ${CADENCE_MEDIA_TARGET} Threads::Threads)
             add_test(NAME silentfilm_cadence_export COMMAND "${CMAKE_COMMAND}"
                 "-DHELPER=$<TARGET_FILE:silentfilm_cadence>" "-DFFMPEG=${SILENTFILM_TEST_FFMPEG}"
                 "-DFFPROBE=${SILENTFILM_TEST_FFPROBE}" "-DTEST_ROOT=${CMAKE_BINARY_DIR}/cadence-artifacts"
@@ -314,3 +377,10 @@ endif()
 install(TARGETS ALEXZSilentFilm
     LIBRARY DESTINATION "ALEXZSilentFilm.ofx.bundle/Contents/${OFX_BINARY_DIRECTORY}"
     RUNTIME DESTINATION "ALEXZSilentFilm.ofx.bundle/Contents/${OFX_BINARY_DIRECTORY}")
+
+if(WIN32 AND SILENTFILM_ENABLE_CUDA)
+    include(cmake/WindowsCudaRuntime.cmake)
+endif()
+if(WIN32 AND SILENTFILM_BUILD_CADENCE)
+    include(cmake/WindowsCadencePackage.cmake)
+endif()

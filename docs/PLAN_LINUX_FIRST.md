@@ -2,6 +2,18 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-18 — агент по прямому запросу пользователя выполнил Linux-регрессию:** configure/build Release CUDA86 и CTest **32/32 Passed, без пропусков, 9.27с**. TCP/abstract provider, PNG/Unicode, platform lifecycle и все CUDA parity прошли. Windows/Resolve пока не проверены.
+
+- [x] ✅ **2026-11-18 — подготовлен полный Windows Cadence:** native helper MSVC/FFmpeg/OpenCV, CUDA, WinSock loopback transport, Unicode/atomic status, GTK launcher/Resolve menu и упаковка. Добавлены transport/platform regressions. **Не запускались:** сборки/тесты/Resolve. [Приёмка](WINDOWS_CADENCE_APP.md).
+- [ ] Следующий шаг Windows Cadence — пользовательская CPU/CUDA-сборка, CTest и Raw/Processed/монтажная приёмка в Resolve.
+
+- [x] ✅ **2026-11-18 — подготовлен подробный Windows-гайд для начинающего пользователя:** готовый ZIP и самостоятельная CPU/CUDA-сборка, установщики, SDK, установка/откат, настройки Resolve, пресеты, ошибки и логи. [Гайд](WINDOWS_USER_GUIDE_RU.md). Прохождение на Windows ещё не подтверждено.
+
+- [x] ✅ **2026-11-18 — подготовлена Windows-инструкция Cadence GTK/Pango:** MSYS2 UCRT64, проверка GTK, пробный запуск UI, ResolvePython и список блокеров native/IPC/launcher. [Инструкция](WINDOWS_CADENCE_APP.md). Историческая подготовка инструкции; последующий перенос описан выше, runtime ещё не подтверждён.
+
+- [x] ✅ **2026-11-18 — по запросу пользователя подготовлен Windows OFX этап:** toolchain, Win32 preset storage, cuFFT DLL, build/test/package/install сценарии. Сборка и работа не проверены. [Pipeline](WINDOWS_SETUP.md).
+- [ ] Следующий шаг Windows — пользовательская CPU/CUDA-сборка и приёмка Resolve; Cadence App собирается отдельно с `-Cadence`. Работы Defects/Linux сохраняются в очереди ниже.
+
 - [x] ✅ **2026-11-14 — опубликована Defects0.36:** [f004fc4](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/f004fc4), main; push подтверждён Git.
 - [x] ✅ **2026-11-14 — подготовлен следующий блок Defects0.36:** bicubic development mottling/streaks/mixed, fog, coherent time, CPU/GPU coarse grids и совместимость старых пресетов. **Проверки пока не выполнялись.** [Инструкция](DEFECTS_DEVELOPMENT_0.36.md).
 - [x] ✅ **2026-11-14 — пользователь подтвердил все предложенные тесты0.36 и ручную работу новой проявки.** Полных логов/численных ошибок/замеров скорости нет; агент проверки не запускал. Следующий этап — surface mixed/hair и Projector Gate softness.

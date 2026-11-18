@@ -8,16 +8,17 @@ import secrets
 import socket
 import struct
 import time
+from cadence_platform import atomic_replace
 
 
 def atomic_state(path, state):
     """Publish provider progress without exposing partial JSON."""
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
-def serve_frames(directory, state, export):
+def serve_frames(directory, state, export, transport=None):
     """Serve only requested frame indices, with a bounded PNG cache and no intermediate movie."""
     directory = Path(directory)
     state_path = directory / "bake_state.json"
@@ -52,18 +53,29 @@ def serve_frames(directory, state, export):
             data.extend(chunk)
         return data
 
+    transport = transport or ("tcp" if os.name == "nt" else "unix_abstract")
+    if transport not in ("tcp", "unix_abstract"):
+        raise ValueError("Unknown frame transport")
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-            server.bind("\0" + name)
+        with socket.socket(socket.AF_INET if transport == "tcp" else socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            if transport == "tcp":
+                # Только loopback, случайный порт, без SO_REUSEADDR на Windows.
+                if os.name == "nt":
+                    server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                server.bind(("127.0.0.1", 0))
+                endpoint = f"transport=tcp\nsocket_host=127.0.0.1\nsocket_port={server.getsockname()[1]}\n"
+            else:
+                server.bind("\0" + name)
+                endpoint = f"transport=unix_abstract\nsocket_name={name}\n"
             server.listen(1)
             server.settimeout(0.5)
-            text = ("SILENTFILM_FRAME_SOURCE_V1\n" + f"socket_name={name}\ntoken={token}\n"
+            text = ("SILENTFILM_FRAME_SOURCE_V1\n" + endpoint + f"token={token}\n"
                     + f"width={state['width']}\nheight={state['height']}\nfps={state['fps']}\nframe_count={state['frame_count']}\n")
             temporary = metadata.with_suffix(".tmp")
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                 output.write(text)
-            temporary.replace(metadata)
+            atomic_replace(temporary, metadata)
             state.update(state="complete", input=str(metadata), progress=100, source_mode="resolve_frames")
             atomic_state(state_path, state)
             deadline = time.monotonic() + 300

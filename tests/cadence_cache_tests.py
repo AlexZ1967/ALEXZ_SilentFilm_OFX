@@ -99,7 +99,12 @@ class ManagedStorage(CacheFixture):
 
     def test_symlinked_generation_and_project_are_not_followed(self):
         directory = self.job()
-        (directory.parent / "alias").symlink_to(directory, target_is_directory=True)
+        try:
+            (directory.parent / "alias").symlink_to(directory, target_is_directory=True)
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("Windows symlink privilege requires Developer Mode or elevation")
+            raise
         (self.root / "project-alias").symlink_to(directory.parent, target_is_directory=True)
         self.assertEqual(len(self.candidates()), 1)
         marker = directory / cache.JOB_MARKER

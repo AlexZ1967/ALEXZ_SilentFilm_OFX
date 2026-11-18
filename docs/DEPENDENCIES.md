@@ -27,22 +27,19 @@ sudo apt install libfftw3-dev
 
 Затем конфигурируйте и собирайте проект как обычно. Пакет и его наличие в репозиториях подтверждены каталогами пакетов [Debian](https://packages.debian.org/source/fftw3) и [Ubuntu](https://packages.ubuntu.com/libfftw3-dev).
 
-## Windows: FFTW3 на будущее
+## Windows: FFTW3 и сборка OFX
 
-Поддержка Windows для плагина пока не проверялась. Для будущей x64-сборки рекомендуемый путь — установить [vcpkg](https://github.com/microsoft/vcpkg), затем из Developer PowerShell с настроенным `VCPKG_ROOT` выполнить:
+✅ **2026-11-18 — подготовлен отдельный Windows pipeline, пока без проверки на Windows.** Полная инструкция компьютера, MSVC/CUDA/SDK, сборки и установки: [WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
-```powershell
-vcpkg install fftw3:x64-windows
-```
-
-Передавайте vcpkg toolchain при конфигурации CMake:
+Для первой конфигурации используется статическая FFTW с динамическим CRT: собственный vcpkg triplet `x64-silentfilm` фиксирует MSVC v143/14.39. После установки и фиксации vcpkg по инструкции, из корня проекта:
 
 ```powershell
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DCMAKE_BUILD_TYPE=Release
+& C:\work\vcpkg\vcpkg.exe install fftw3:x64-silentfilm --overlay-triplets=cmake/triplets
 ```
 
-Порт vcpkg собирает FFTW для выбранного triplet; текущий CMake ожидает `fftw3.h` и библиотеку single precision `fftw3f`. Для запуска плагина также потребуется, чтобы соответствующая DLL FFTW находилась в доступном Windows пути загрузки или рядом с bundle. Эти команды являются предварительной инструкцией: toolchain, упаковку DLL и загрузку OFX на Windows ещё требуется проверить. Порт и команда установки описаны в [каталоге vcpkg для FFTW3](https://vcpkg.io/en/package/fftw3.html); официальные заметки FFTW по Windows доступны [на сайте FFTW](https://fftw.org/install/windows.html).
+FFTW single precision остаётся обязательной. Порт vcpkg собирает `fftw3f`; [исходник порта Microsoft](https://github.com/microsoft/vcpkg/tree/de36db04550a8625e3154b1a758c60035901f244/ports/fftw3). Старый предварительный путь `x64-windows` с отдельной FFTW DLL не является конфигурацией этого pipeline.
 
+В Windows CUDA backend линкуется с **динамической cuFFT**: NVIDIA не предоставляет там static cuFFT/cuLIBOS. DLL выбранного Toolkit упаковываются рядом с OFX, cuFFT загружается через delay-load hook по абсолютному пути. Linux static backend сохранён. Cadence App/FFmpeg/OpenCV/GTK подключаются отдельным `-Cadence`; в OFX эти зависимости не встраиваются.
 
 ## Camera CUDA
 
@@ -81,6 +78,8 @@ sudo apt install pkg-config libavformat-dev libavcodec-dev libavutil-dev libswsc
 Прежний скрипт Resolve написан на Lua, дополнительных Python-модулей/Conda не требует. Его инструкция — `CADENCE_PREPARE.md`.
 
 ## Отдельное окно Cadence 0.11
+
+Windows: [полная инструкция Cadence](WINDOWS_CADENCE_APP.md), MSYS2 UCRT64 для GUI и отдельные vcpkg FFmpeg/OpenCV/Zstd для MSVC helper. Полный путь реализован в исходниках, сборка и runtime ещё требуют проверки.
 
 Для нового Linux-окна GTK 4/Pango пользователь устанавливает системный PyGObject:
 

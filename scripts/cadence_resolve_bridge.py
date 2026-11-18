@@ -22,6 +22,7 @@ if _BRIDGE_DIRECTORY not in sys.path:
 
 from cadence_exposure import FusionExposureError, configure_fusion_exposure
 from cadence_color_preset import configure_color_exposure
+from cadence_platform import child_environment, detached_options, ffmpeg_executable, atomic_replace
 
 
 def check(value, message):
@@ -204,7 +205,7 @@ def atomic_json(path, data):
     """Publish durable state without exposing half-written JSON to GUI polling."""
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def find_timeline(project, identity):
@@ -376,7 +377,8 @@ def direct_start(project, request):
     try:
         with (directory / "resolve_frames.log").open("ab") as log:
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--provider-worker", str(directory)],
-                                       stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                                       stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                       env=child_environment(), **detached_options())
     except Exception as error:
         state.update(state="error", error=str(error))
         atomic_json(directory / "bake_state.json", state)
@@ -524,7 +526,7 @@ def direct_worker(directory):
         export_seconds = pipe_wait_seconds = 0.0
         last_progress = time.monotonic()
         with (directory / "ffmpeg_frames.log").open("wb") as log:
-            encoder = subprocess.Popen(["/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-f", "image2pipe",
+            encoder = subprocess.Popen([ffmpeg_executable(), "-nostdin", "-v", "error", "-f", "image2pipe",
                                         "-framerate", str(state["fps"]), "-vcodec", "png", "-i", "pipe:0",
                                         "-an", "-c:v", "ffv1", "-level", "3", "-threads", "4", "-slices", "4", "-slicecrc", "0", "-pix_fmt", pixel_format,
                                         "-y", str(output)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
@@ -1151,7 +1153,7 @@ def import_result(project, request, resolve=None):
         outcome = attach_crank_exposure(project, result, outcome, resolve, location=exposure_location, fresh=True)
         temporary = marker.with_suffix(".tmp")
         temporary.write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(marker)
+        atomic_replace(temporary, marker)
         return outcome
     old_timeline = project.GetCurrentTimeline()
     name = "SilentFilm Cadence — " + context.get("source_name", "Result") + datetime.datetime.now().strftime(" — %H%M%S")
@@ -1182,7 +1184,7 @@ def import_result(project, request, resolve=None):
     outcome = attach_crank_exposure(project, result, outcome, resolve, location=exposure_location, fresh=True)
     temporary = marker.with_suffix(".tmp")
     temporary.write_text(json.dumps(outcome, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(marker)
+    atomic_replace(temporary, marker)
     return outcome
 
 

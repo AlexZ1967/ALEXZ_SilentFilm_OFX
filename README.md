@@ -6,6 +6,12 @@
 
 ## Что подготовлено
 
+✅ **2026-11-18 — подготовлен полный Windows-путь Cadence:** native FFmpeg/OpenCV helper, существующие CPU/CUDA вычисления, запрос кадров Resolve по loopback TCP, GTK launcher и меню Resolve. Сборка/работа ещё не проверены. [Установка и запуск](docs/WINDOWS_CADENCE_APP.md).
+
+Windows: [подробный гайд для пользователя — установка, сборка и настройка Resolve](docs/WINDOWS_USER_GUIDE_RU.md). Первая проверка на Windows ещё ожидается.
+
+✅ **2026-11-18 — подготовлен Windows x64 OFX pipeline:** компьютер, MSVC/CUDA/FFTW, PowerShell-сборка, упаковка и установка. **В Windows ещё не проверен.** [Пошаговая инструкция](docs/WINDOWS_SETUP.md).
+
 ✅ **2026-11-14 — Defects0.36 опубликована в main:** [f004fc4](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/f004fc4). Тесты и ручная работа проявки подтверждены пользователем.
 
 ✅ **2026-11-14 — подготовлена Defects0.36:** пятнистость/полосы/смешанная неоднородность проявки, Development Fog и плавная связь по времени. Общая CPU/CUDA математика, на GPU — малая coarse-сетка и один image pass; Legacy и старые пресеты сохраняются. ✅ **2026-11-14 — пользователь подтвердил тесты и ручную работу.** Агент проверки не запускал. [Команды и сценарии](docs/DEFECTS_DEVELOPMENT_0.36.md).
