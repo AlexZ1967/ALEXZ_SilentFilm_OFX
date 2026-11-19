@@ -2,10 +2,16 @@
 param(
     [string]$AppDirectory = '',
     [string]$MsysRoot = 'C:\msys64',
-    [string]$ResolvePython = "$env:ProgramFiles\Blackmagic Design\DaVinci Resolve\ResolvePython\ResolvePython.exe"
+    [string]$ResolvePython = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$programFiles64 = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+if ([string]::IsNullOrWhiteSpace($ResolvePython)) {
+    $ResolvePython = if ($env:SILENTFILM_RESOLVE_PYTHON) { $env:SILENTFILM_RESOLVE_PYTHON }
+        else { Join-Path $programFiles64 'Blackmagic Design/DaVinci Resolve/ResolvePython/ResolvePython.exe' }
+}
+if (!(Test-Path -LiteralPath $ResolvePython)) { throw "Resolve 21.1+ interpreter not found: $ResolvePython. Specify -ResolvePython for a custom installation." }
 # Папку определяем после param: это работает и при powershell.exe -File.
 if ([string]::IsNullOrWhiteSpace($AppDirectory)) { $AppDirectory = $PSScriptRoot }
 $AppDirectory = (Resolve-Path -LiteralPath $AppDirectory).Path
@@ -29,8 +35,12 @@ logs.mkdir(parents=True, exist_ok=True)
 environment = os.environ.copy()
 for name in ('PYTHONHOME', 'PYTHONPATH'):
     environment.pop(name, None)
+windows = Path(environment.get('SystemRoot', 'C:/Windows'))
+shell = windows / 'Sysnative/WindowsPowerShell/v1.0/powershell.exe'
+if not shell.is_file():
+    shell = windows / 'System32/WindowsPowerShell/v1.0/powershell.exe'
 with (logs / 'app_start.log').open('ab') as log:
-    process = subprocess.Popen(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'RemoteSigned',
+    process = subprocess.Popen([str(shell), '-NoProfile', '-ExecutionPolicy', 'RemoteSigned',
                                 '-File', str(launcher), '-MsysRoot', configuration['msys'],
                                 '-ResolvePython', configuration['resolve_python']],
                                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,

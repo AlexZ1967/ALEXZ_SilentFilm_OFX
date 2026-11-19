@@ -9,6 +9,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$programFiles64 = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+$powerShell64 = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$sysnative = Join-Path $env:SystemRoot 'Sysnative/WindowsPowerShell/v1.0/powershell.exe'
+if (Test-Path -LiteralPath $sysnative) { $powerShell64 = $sysnative }
 if ($env:OS -ne 'Windows_NT') { throw 'Build the standalone installer on Windows x64.' }
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 $StageDirectory = (Resolve-Path -LiteralPath $StageDirectory).Path
@@ -26,8 +30,8 @@ $packagingMarker = ''
 
 # Inno Setup нужен только на машине, создающей установщик.
 if (!$InnoCompiler) {
-    $options = @("$env:ProgramFiles\Inno Setup 7\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
-                 "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe")
+    $options = @("$programFiles64\Inno Setup 7\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+                 "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$programFiles64\Inno Setup 6\ISCC.exe")
     foreach ($option in $options) { if (Test-Path -LiteralPath $option) { $InnoCompiler = $option; break } }
 }
 if (!$InnoCompiler -or !(Test-Path -LiteralPath $InnoCompiler)) {
@@ -60,6 +64,8 @@ $saved = $false
 $published = $false
 & (Join-Path $sourcePrefix 'bin/python.exe') -I -X utf8 (Join-Path $repo 'tests/windows_runtime_bundle_tests.py')
 if ($LASTEXITCODE -ne 0) { throw 'PE dependency selection tests failed.' }
+& $powerShell64 -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $repo 'tests/windows_launcher_paths_tests.ps1') -RepoRoot $repo
+if ($LASTEXITCODE -ne 0) { throw 'Windows launcher path tests failed.' }
 try {
     New-Item -ItemType Directory -Path (Join-Path $incoming 'ucrt64') -Force | Out-Null
     # Отбираем только runtime и замыкание DLL, а не всё установленное UCRT64.
@@ -78,7 +84,7 @@ try {
     foreach ($file in @('Start-Cadence.ps1', 'Start-Cadence.cmd', 'Install-Cadence-Menu.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $app -Force
     }
-    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $app 'Start-Cadence.ps1') -CheckRuntime
+    & $powerShell64 -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $app 'Start-Cadence.ps1') -CheckRuntime
     if ($LASTEXITCODE -ne 0) { throw 'Relocated Python/GTK runtime check failed. The installer was not created.' }
     if ($saved) { Remove-Item -LiteralPath $previous -Recurse -Force; $saved = $false }
 } catch {

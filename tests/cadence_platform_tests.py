@@ -39,6 +39,14 @@ class Environments(unittest.TestCase):
             self.assertEqual(platform.settings_root(), Path("C:/Users/A/AppData/Local"))
             self.assertTrue(platform.resolve_python().replace("\\", "/").endswith("ResolvePython/ResolvePython.exe"))
 
+    def test_windows_resolve_uses_native_program_files_under_wow64(self):
+        environment = {"ProgramFiles": "C:/Program Files (x86)", "ProgramW6432": "C:/Program Files"}
+        with patch.object(platform, "WINDOWS", True), patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(platform.resolve_python().replace("\\", "/"),
+                             "C:/Program Files/Blackmagic Design/DaVinci Resolve/ResolvePython/ResolvePython.exe")
+            os.environ["SILENTFILM_RESOLVE_PYTHON"] = "D:/Resolve/ResolvePython.exe"
+            self.assertEqual(platform.resolve_python(), "D:/Resolve/ResolvePython.exe")
+
     def test_detach_is_platform_specific(self):
         with patch.object(platform, "WINDOWS", False):
             self.assertEqual(platform.detached_options(), {"start_new_session": True})

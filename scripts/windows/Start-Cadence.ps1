@@ -2,12 +2,17 @@
 param(
     [string]$AppDirectory = '',
     [string]$MsysRoot = $(if ($env:SILENTFILM_MSYS_ROOT) { $env:SILENTFILM_MSYS_ROOT } else { 'C:\msys64' }),
-    [string]$ResolvePython = $(if ($env:SILENTFILM_RESOLVE_PYTHON) { $env:SILENTFILM_RESOLVE_PYTHON } else { "$env:ProgramFiles\Blackmagic Design\DaVinci Resolve\ResolvePython\ResolvePython.exe" }),
+    [string]$ResolvePython = '',
     [ValidateSet('auto', 'cpu', 'cuda')][string]$Backend = 'auto',
     [switch]$CheckRuntime
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$programFiles64 = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+if ([string]::IsNullOrWhiteSpace($ResolvePython)) {
+    $ResolvePython = if ($env:SILENTFILM_RESOLVE_PYTHON) { $env:SILENTFILM_RESOLVE_PYTHON }
+        else { Join-Path $programFiles64 'Blackmagic Design/DaVinci Resolve/ResolvePython/ResolvePython.exe' }
+}
 # При -File Windows PowerShell может не заполнить PSScriptRoot в param defaults.
 if ([string]::IsNullOrWhiteSpace($AppDirectory)) { $AppDirectory = $PSScriptRoot }
 $AppDirectory = (Resolve-Path -LiteralPath $AppDirectory).Path

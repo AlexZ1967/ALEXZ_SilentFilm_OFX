@@ -107,6 +107,8 @@ Launcher предпочитает `runtime/ucrt64`, запускает Python с
 
 ## Приёмка на второй машине
 
+**Program Files (x86) в ошибке ResolvePython:** исправлен выбор native64 каталогов через ProgramW6432/CommonProgramW6432, launcher выбирает native PowerShell. После git pull повторить подготовку папки и Setup, чтобы обновились launcher и сгенерированное меню. Нестандартный ResolvePython остаётся доступен через -ResolvePython или SILENTFILM_RESOLVE_PYTHON. Переустанавливать Resolve при существующем корректном interpreter не требуется. Package-Standalone также запускает проверку меню в реальном32битном PowerShell с изолированными папками.
+
 1. На машине без MSYS2/Python/Toolkit скопировать всю папку с files, запустить Setup.exe; разрешить UAC.
 2. Открыть Resolve Studio21.1+, меню Cadence. Проверить шрифты/русский текст/диалоги/пресеты.
 3. Короткий клип: Raw Source и с обработками, In/Out, CUDA, результат в том же таймлайне.

@@ -11,7 +11,9 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Open PowerShell as Administrator for this installation step.'
 }
-$plugins = Join-Path $env:CommonProgramFiles 'OFX/Plugins'
+$commonFiles64 = if ($env:CommonProgramW6432) { $env:CommonProgramW6432 }
+    elseif ($env:ProgramW6432) { Join-Path $env:ProgramW6432 'Common Files' } else { $env:CommonProgramFiles }
+$plugins = Join-Path $commonFiles64 'OFX/Plugins'
 $destination = Join-Path $plugins 'ALEXZSilentFilm.ofx.bundle'
 New-Item -ItemType Directory -Path $plugins -Force | Out-Null
 if (Test-Path $destination) {

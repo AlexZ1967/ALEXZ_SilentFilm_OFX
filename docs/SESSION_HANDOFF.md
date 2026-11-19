@@ -1,5 +1,19 @@
 # Состояние проекта для нового диалога
 
+## Windows WOW64: ResolvePython в неправильном Program Files — 2026-11-20
+
+Пользователь сообщил Cadence launch fail: Required file not found C:/Program Files (x86)/Blackmagic Design/DaVinci Resolve/ResolvePython/ResolvePython.exe. Он подтвердил фактическую установку Resolve в C:/Program Files/Blackmagic Design/DaVinci Resolve. Вывод также содержит старый общий GUI exit1 без Python traceback, не объявлять его доказанной отдельной причиной.
+
+✅ **2026-11-20 — подготовлен fix выбора native64 путей:** Start-Cadence/Install-Cadence-Menu и Python resolve_python используют ProgramW6432 с fallback ProgramFiles; explicit/env override сохраняются. Menu проверяет реальный interpreter до записи, generated Python выбирает Sysnative/System32 PowerShell, CMD launchers тоже native64. CommonProgramW6432 применяется для OFX (включая legacy Install-OFX), Sysnative используется при необходимости для elevated/runtime-check PowerShell; Inno compiler lookup учитывает ProgramW6432.
+
+Добавлены Python WOW64 path regression и Windows PS regression с реальным32битным процессом и изолированными temp APPDATA/ProgramFiles fixture: проверяется native64 menu path/env/explicit overrides. PS regression вызывается из Package-Standalone и Windows CTest. Агент эти проверки не запускал; Windows fix ещё ожидает подтверждения. Для текущего установленного app можно сразу перегенерировать menu, явно передав -ResolvePython 'C:/Program Files/.../ResolvePython.exe', без C++ rebuild. Для следующих установок — git pull/repackage folder и повторный Setup. CUDA архитектуру это не меняет; актуальную75;89 сборку пользователь пока не прислал логом.
+
+## Folder Setup: создание и runtime cache подтверждены — 2026-11-20
+
+✅ **2026-11-20 — пользователь подтвердил Package-Standalone из bfa6654:**8tests OK за0.209с; Runtime cache hit (без копирования runtime); isolated Runtime OK Python3.14.10/Gtk4.24/Pango1.58.2/fonts185; предупреждение GLibWin32 в присланном выводе отсутствует. Inno создал `build-windows-cadence-cuda-ninja/ALEXZSilentFilm-Setup-build-windows-cadence-cuda-ninja-sm75-folder/Setup.exe`, files лежат рядом, payload не сжимается. Это подтверждение подготовки folder-комплекта и runtime reuse, не установки через новый Setup и не чистой target Windows.
+
+Следующий шаг — собрать75;89 дляRTX4070Ti (текущий foldersm75), проверить установку из Setup.exe с соседним files на target безMSYS2. Отдельный Setup.exe cache hit и incremental app-only update ещё не подтверждены: текущий лог показывает компиляцию малого Setup (Updating version info). Агент проверки/сборки не запускал.
+
 ## Setup.exe + files без компрессии — подготовлен 2026-11-20
 
 По запросу пользователя default Standalone теперь папка ...-folder/Setup.exe + files. Inno ExternalPayload mode не встраивает payload и вызывает общий installer непосредственно из {src}/files, без предварительного копирования всего payload в Temp. На другую машину переносится вся папка. SingleExe оставлен отдельным opt-in Package/Build (-Standalone -SingleExe). Внешний Setup проверяет наличие соседнего payload перед запуском.

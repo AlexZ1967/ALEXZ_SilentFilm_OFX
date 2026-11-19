@@ -2,6 +2,12 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-20 — подготовлен WOW64 fix:** native64 Program Files для ResolvePython/OFX, native PowerShell launchers, explicit path overrides сохранены; добавлены Python и реальный32битный PS regressions.
+- [ ] Пользовательская проверка открытия установленного меню после native64 path fix; новые тесты/повторный Setup ещё не подтверждены.
+
+- [x] ✅ **2026-11-20 — пользователь подтвердил folder Setup:**8tests OK/0.209с, Runtime cache hit, smoke OK без GLibWin32 warning, Setup.exe + files созданы без сжатия payload дляsm75.
+- [ ] Собрать75;89 дляRTX4070Ti и проверить folder Setup/OFX/Cadence на target безMSYS2; отдельное обновление app-only/Setup.exe cache hit ещё ожидает проверки.
+
 - [x] ✅ **2026-11-20 — Standalone default изменён на папку Setup.exe + files:** без компрессии payload, с incremental sync, runtime/Setup cache; один сжатый EXE только через -SingleExe.
 - [ ] Пользовательская Windows-проверка нового folder Setup: создание, повторный cache hit, обновление app-файлов без повторного сжатия, установка на target с соседним files. Новые cache tests ещё не запускались.
 

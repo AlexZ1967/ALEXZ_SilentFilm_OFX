@@ -54,7 +54,7 @@ def resolve_python():
     if override:
         return override
     if WINDOWS:
-        return str(Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+        return str(Path(os.environ.get("ProgramW6432") or os.environ.get("ProgramFiles") or "C:/Program Files")
                    / "Blackmagic Design/DaVinci Resolve/ResolvePython/ResolvePython.exe")
     return "/opt/resolve/bin/ResolvePython"
 

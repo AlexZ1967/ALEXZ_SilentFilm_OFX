@@ -300,6 +300,13 @@ if(BUILD_TESTING)
             find_program(SILENTFILM_TEST_PYTHON python3 PATHS /usr/bin NO_DEFAULT_PATH)
         endif()
         if(SILENTFILM_TEST_PYTHON)
+            if(WIN32)
+                find_program(SILENTFILM_TEST_POWERSHELL powershell.exe
+                    PATHS "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0" NO_DEFAULT_PATH REQUIRED)
+                add_test(NAME silentfilm_windows_launcher_paths COMMAND "${SILENTFILM_TEST_POWERSHELL}"
+                    -NoProfile -ExecutionPolicy RemoteSigned -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_launcher_paths_tests.ps1"
+                    -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}")
+            endif()
             add_test(NAME silentfilm_windows_runtime_bundle COMMAND "${SILENTFILM_TEST_PYTHON}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_runtime_bundle_tests.py")
             set_tests_properties(silentfilm_windows_runtime_bundle PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")

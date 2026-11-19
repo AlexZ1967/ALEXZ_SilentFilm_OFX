@@ -7,6 +7,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$commonFiles64 = if ($env:CommonProgramW6432) { $env:CommonProgramW6432 }
+    elseif ($env:ProgramW6432) { Join-Path $env:ProgramW6432 'Common Files' } else { $env:CommonProgramFiles }
+$powerShell64 = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$sysnative = Join-Path $env:SystemRoot 'Sysnative/WindowsPowerShell/v1.0/powershell.exe'
+if (Test-Path -LiteralPath $sysnative) { $powerShell64 = $sysnative }
 $transcript = $false
 if ($LogFile) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $LogFile) -Force | Out-Null
@@ -37,7 +42,7 @@ function Assert-ResolveClosed {
 function Install-OfxBundle {
     param([string]$Source)
     Assert-ResolveClosed
-    $plugins = Join-Path $env:CommonProgramFiles 'OFX/Plugins'
+    $plugins = Join-Path $commonFiles64 'OFX/Plugins'
     $destination = Join-Path $plugins 'ALEXZSilentFilm.ofx.bundle'
     $identifier = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N')
     $incoming = Join-Path $plugins ('.silentfilm-install-' + $identifier)
@@ -125,10 +130,10 @@ try {
         # Повышается только копирование OFX; аргументы путей заключены в кавычки.
         $arguments = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File',
             ('"' + $PSCommandPath + '"'), '-StageDirectory', ('"' + $StageDirectory.TrimEnd('\') + '"'), '-OfxOnly')
-        $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        $process = Start-Process -FilePath $powerShell64 `
             -ArgumentList $arguments -Verb RunAs -Wait -PassThru
         if ($process.ExitCode -ne 0) { throw 'OFX installation failed. Cadence was not changed.' }
-        Write-Host ('OFX installed: ' + (Join-Path $env:CommonProgramFiles 'OFX/Plugins/ALEXZSilentFilm.ofx.bundle'))
+        Write-Host ('OFX installed: ' + (Join-Path $commonFiles64 'OFX/Plugins/ALEXZSilentFilm.ofx.bundle'))
     }
 
     if ($hasApp) {
@@ -158,7 +163,7 @@ try {
                 if (Test-Path -LiteralPath $sourceFile) { Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $incoming $file) }
             }
             if (Test-Path -LiteralPath (Join-Path $incoming 'runtime/ucrt64/bin/python.exe')) {
-                & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $incoming 'Start-Cadence.ps1') -CheckRuntime
+                & $powerShell64 -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $incoming 'Start-Cadence.ps1') -CheckRuntime
                 if ($LASTEXITCODE -ne 0) { throw 'The bundled GTK/Python runtime failed its target-machine check. Previous Cadence was kept.' }
             }
             if (Test-Path -LiteralPath $destination) {
