@@ -1,5 +1,11 @@
 # Состояние проекта для нового диалога
 
+## README и единый Windows-маршрут — обновлены 2026-11-20
+
+✅ **2026-11-20 — по запросу пользователя обновлён README:** Windows-раздел со сделанным/датами и точными подтверждёнными CPU23/23/CUDA31/31, runtime106.7MiB/8tests/cache/folder creation. Удалены текущие ложные формулировки «первая Windows-проверка ожидается», история помечена историей. Не объявлены проверенными новый UAC387380e/новые launcher tests/targetRTX4070Ti.
+
+Добавлен WINDOWS_QUICKSTART_RU.md: подготовка builder со ссылками на подробные гайды, команды одним PowerShell-рядом для75;89 Standalone, repack без C++ rebuild, перенос всейfolder/Setup+files и установка на target, журналы/ручная проверка. README содержит таблицу ссылок на подготовку/Ninja/Cadence/Standalone/installer; подробный Windows user guide ссылается на актуальный маршрут. Это документация, агент сборки/тесты/Setup не запускал. Следующий технический шаг прежний: пользователь повторяет Setup после UAC-fix и присылает новый log.
+
 ## Folder Setup: Start-Process path failure — подготовлен fix 2026-11-20
 
 Пользователь прислал install.log из ...sm75-89-folder/files: после Cadence default backend=cuda Start-Process завершился ERROR_PATH_NOT_FOUND; OFX installed/Installation complete нет. Старый лог не различает UAC host и VC redist Start-Process, битность тоже не записана; точную первопричину не объявлять установленной.

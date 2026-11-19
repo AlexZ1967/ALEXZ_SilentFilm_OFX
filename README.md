@@ -1,16 +1,31 @@
 # ALEXZ SilentFilm OFX
 
-Отдельный проект нативных OpenFX-эффектов для DaVinci Resolve. Первая целевая платформа — **Linux x86_64**, базовые проверки выполнены в **Resolve Studio 20.2**; пользователь обновился до **Resolve 21**, совместимость нового интерфейса ещё проверяется.
+Нативные OpenFX-эффекты и приложение Cadence для DaVinci Resolve, с вычислениями на CPU и NVIDIA CUDA. Первая реализация выполнена для **Linux x86_64**; сборки **Windows x64** и работа обычного Windows-комплекта проверены пользователем в **Resolve Studio 21.1.2**. Статус нового автономного установщика указан ниже.
 
 Проект расположен в `/home/alex/Projects/ALEXZ_SilentFilm_OFX`. Рабочий ComfyUI-пакет SilentFilm не изменяется и используется как справочная реализация. Его Python/PyTorch-инфраструктура в процесс Resolve не встраивается.
 
+## Windows: сборка, Setup и установка
+
+**Начать здесь: [пошаговый маршрут для Windows — компиляция → создание Setup → установка](docs/WINDOWS_QUICKSTART_RU.md).** Команды PowerShell приведены по одной строке.
+
+| Задача | Инструкция |
+| --- | --- |
+| Подготовить Windows, компилятор, CUDA и зависимости | [Подробный гайд для пользователя](docs/WINDOWS_USER_GUIDE_RU.md) |
+| Скомпилировать CPU/CUDA через Ninja | [Сборка Windows через Ninja](docs/WINDOWS_NINJA_BUILD.md) |
+| Собрать и настроить приложение Cadence | [Cadence GTK/Pango на Windows](docs/WINDOWS_CADENCE_APP.md) |
+| Создать автономный комплект **Setup.exe + files**, обновлять без перекомпрессии | [Создание и обновление автономного комплекта](docs/WINDOWS_STANDALONE.md) |
+| Установить OFX и Cadence, найти резервные копии | [Единый Windows-установщик](docs/WINDOWS_INSTALLER.md) |
+
+- ✅ **2026-11-19:** пользователь подтвердил Windows CPU Cadence **23/23** и CUDA **31/31** тестов без пропусков на RTX 2070; затем работу Cadence и OFX в Resolve Studio 21.1.2. Эти результаты относятся к тому срезу исходников.
+- ✅ **2026-11-20:** подготовлен автономный Python/GTK/Pango-runtime; пользователь подтвердил его проверку, размер **106,7 МиБ**, последующие **8 тестов отбора зависимостей**, повторное использование runtime и создание папки установщика без сжатия payload.
+- ✅ **2026-11-20:** добавлены инкрементальное обновление `files`, повторное использование малого Setup.exe и исправления 64-битных Windows-путей. Компиляторы, SDK и CUDA Toolkit в готовый комплект не включаются.
+- **Ожидается проверка:** повторная установка автономного комплекта после исправления запуска UAC [`387380e`](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/387380e), новые проверки Windows launcher и работа на целевой RTX 4070 Ti. Успешное создание Setup само по себе не подтверждает его установку.
+
+На вторую машину переносится **вся папка с Setup.exe и files**. MSYS2/Python/компилятор/Toolkit отдельно там не нужны; требуются подходящий драйвер NVIDIA и Resolve Studio 21.1+ для Cadence. Сборка с `-CudaArchitectures '75;89'` включает код для RTX 2070 и RTX 4070 Ti. Компиляцию, тесты и установку выполняет пользователь.
+
 ## Что подготовлено
 
-✅ **2026-11-18 — подготовлен полный Windows-путь Cadence:** native FFmpeg/OpenCV helper, существующие CPU/CUDA вычисления, запрос кадров Resolve по loopback TCP, GTK launcher и меню Resolve. Сборка/работа ещё не проверены. [Установка и запуск](docs/WINDOWS_CADENCE_APP.md).
-
-Windows: [подробный гайд для пользователя — установка, сборка и настройка Resolve](docs/WINDOWS_USER_GUIDE_RU.md). Первая проверка на Windows ещё ожидается.
-
-✅ **2026-11-18 — подготовлен Windows x64 OFX pipeline:** компьютер, MSVC/CUDA/FFTW, PowerShell-сборка, упаковка и установка. **В Windows ещё не проверен.** [Пошаговая инструкция](docs/WINDOWS_SETUP.md).
+Ниже — история этапов; пометки о непроверенных изменениях отражают состояние на соответствующую дату.
 
 ✅ **2026-11-14 — Defects0.36 опубликована в main:** [f004fc4](https://github.com/AlexZ1967/ALEXZ_SilentFilm_OFX/commit/f004fc4). Тесты и ручная работа проявки подтверждены пользователем.
 
@@ -96,7 +111,7 @@ tests/                 небольшие независимые тесты яд
 docs/                  план и ручная проверка
 ```
 
-OpenFX подключается из установленного SDK. Заголовки и Support Library не копируются в проект; SDK-библиотеки и OpenGL не линкуются. Используется C API OpenFX V1, примеры Resolve служат справкой. Для спектральной диффузии используется FFTW3 single precision (`libfftw3f`). Инструкция установки дополнительных зависимостей для Linux и будущей Windows-сборки: [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md). CUDA descriptor включён для Host Probe, Camera, Camera Optics и Projector; в 0.19 добавлены Negative/Print с нормализованным зерном и halation. В 0.20 подготовлен CUDA Defects, его сборки и проверки ещё ожидаются.
+OpenFX подключается из установленного SDK. Заголовки и Support Library не копируются в проект; SDK-библиотеки и OpenGL не линкуются. Используется C API OpenFX V1, примеры Resolve служат справкой. Для спектральной диффузии используется FFTW3 single precision (`libfftw3f`). Инструкция установки дополнительных зависимостей для Linux и Windows: [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md). Реализованы CPU/CUDA-пути оптики камеры, Negative/Print, Defects, Projector и Crank Exposure. Подтверждённые Windows-прогоны и оставшиеся проверки установщика перечислены выше.
 
 ## Сборка на текущей Linux-машине
 
@@ -117,7 +132,7 @@ build/ofx/ALEXZSilentFilm.ofx.bundle/Contents/Linux-x86-64/ALEXZSilentFilm.ofx
 
 Для разработки используются системные CMake, CTest и GCC/Clang с поддержкой C++17. Conda и Python для сборки и работы плагина не нужны. Если в терминале активировано Conda environment, перед конфигурацией проекта выйдите из него через `conda deactivate`, чтобы CMake выбрал системный toolchain. Другой SDK задаётся через `OFX_SDK_ROOT`; для стороннего OpenFX SDK можно явно указать `OFX_INCLUDE_DIR`.
 
-CMake содержит расположения бинарников Windows/macOS для дальнейшего развития. Работоспособность на этих ОС пока не заявляется; упаковка, архитектуры и GPU требуют отдельных проверок.
+CMake поддерживает размещение бинарников Windows x64; подтверждённые проверки и оставшиеся шаги установщика перечислены в разделе Windows выше. macOS ещё не проверялась. Работа других GPU и машин требует отдельной проверки.
 
 ## CUDA-сборка на текущей машине
 
