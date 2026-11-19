@@ -2,6 +2,9 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-20 — подготовлен fix Start-Process в folder Setup:** x86→x64 до UAC, физический System32 для RunAs, явная рабочая папка и раздельная диагностика VC/UAC; regression расширен без реального повышения прав.
+- [ ] Пользователь повторяет folder Setup75;89 после обновления files и присылает результат/новый install.log; фактический UAC ещё не подтверждён.
+
 - [x] ✅ **2026-11-20 — подготовлен WOW64 fix:** native64 Program Files для ResolvePython/OFX, native PowerShell launchers, explicit path overrides сохранены; добавлены Python и реальный32битный PS regressions.
 - [ ] Пользовательская проверка открытия установленного меню после native64 path fix; новые тесты/повторный Setup ещё не подтверждены.
 

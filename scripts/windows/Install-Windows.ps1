@@ -3,15 +3,36 @@ param(
     [string]$StageDirectory = '',
     [string]$MsysRoot = 'C:\msys64',
     [switch]$OfxOnly,
-    [string]$LogFile = ''
+    [string]$LogFile = '',
+    [switch]$CheckLaunch
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Sysnative разрешается только внутри WOW64. Сначала без UAC переходим в x64,
+# затем для ShellExecute/RunAs используем настоящий System32, доступный брокеру.
+if ([Environment]::Is64BitOperatingSystem -and ![Environment]::Is64BitProcess) {
+    $nativeShell = Join-Path $env:SystemRoot 'Sysnative/WindowsPowerShell/v1.0/powershell.exe'
+    if (!(Test-Path -LiteralPath $nativeShell -PathType Leaf)) { throw "Native PowerShell not found: $nativeShell" }
+    $nativeArguments = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File', $PSCommandPath)
+    if ($StageDirectory) { $nativeArguments += @('-StageDirectory', $StageDirectory) }
+    if ($MsysRoot) { $nativeArguments += @('-MsysRoot', $MsysRoot) }
+    if ($LogFile) { $nativeArguments += @('-LogFile', $LogFile) }
+    if ($OfxOnly) { $nativeArguments += '-OfxOnly' }
+    if ($CheckLaunch) { $nativeArguments += '-CheckLaunch' }
+    if (!$CheckLaunch) { Write-Host 'Restarting installer in native 64-bit PowerShell (before UAC).' }
+    & $nativeShell @nativeArguments
+    exit $LASTEXITCODE
+}
+if (![Environment]::Is64BitProcess) { throw 'SilentFilm requires 64-bit Windows.' }
 $commonFiles64 = if ($env:CommonProgramW6432) { $env:CommonProgramW6432 }
     elseif ($env:ProgramW6432) { Join-Path $env:ProgramW6432 'Common Files' } else { $env:CommonProgramFiles }
 $powerShell64 = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-$sysnative = Join-Path $env:SystemRoot 'Sysnative/WindowsPowerShell/v1.0/powershell.exe'
-if (Test-Path -LiteralPath $sysnative) { $powerShell64 = $sysnative }
+if (!(Test-Path -LiteralPath $powerShell64 -PathType Leaf)) { throw "PowerShell host not found: $powerShell64" }
+if ($CheckLaunch) {
+    [ordered]@{ is_64_bit = [Environment]::Is64BitProcess; native_powershell = $powerShell64;
+        common_files = $commonFiles64; script = $PSCommandPath } | ConvertTo-Json -Compress
+    exit 0
+}
 $transcript = $false
 if ($LogFile) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $LogFile) -Force | Out-Null
@@ -27,7 +48,8 @@ function Install-Prerequisites {
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
             throw 'Invalid Microsoft signature on the bundled Visual C++ Redistributable.'
         }
-        $process = Start-Process -FilePath $redist -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+        Write-Host "Visual C++ runtime: $redist"
+        $process = Start-Process -FilePath $redist -WorkingDirectory $Stage -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
         if ($process.ExitCode -notin @(0, 1638, 3010)) { throw "Visual C++ runtime installation failed: $($process.ExitCode)" }
         if ($process.ExitCode -eq 3010) { Write-Host 'Visual C++ runtime installed; Windows requests a reboot.' }
     }
@@ -91,6 +113,7 @@ try {
         }
     }
     $StageDirectory = (Resolve-Path -LiteralPath $StageDirectory).Path
+    Write-Host "Installer host: $powerShell64; native64=$([Environment]::Is64BitProcess); payload: $StageDirectory"
     $sourceBundle = Join-Path $StageDirectory 'ALEXZSilentFilm.ofx.bundle'
     if (!(Test-Path -LiteralPath (Join-Path $sourceBundle 'Contents/Win64/ALEXZSilentFilm.ofx'))) {
         throw 'The stage directory does not contain the complete OFX bundle.'
@@ -128,11 +151,21 @@ try {
     if ($administrator) { Install-Prerequisites $StageDirectory; Install-OfxBundle $sourceBundle }
     else {
         # Повышается только копирование OFX; аргументы путей заключены в кавычки.
+        $elevatedLog = Join-Path $env:ProgramData ('ALEXZSilentFilm/install-logs/ofx-' + [guid]::NewGuid().ToString('N') + '.log')
         $arguments = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File',
-            ('"' + $PSCommandPath + '"'), '-StageDirectory', ('"' + $StageDirectory.TrimEnd('\') + '"'), '-OfxOnly')
-        $process = Start-Process -FilePath $powerShell64 `
-            -ArgumentList $arguments -Verb RunAs -Wait -PassThru
-        if ($process.ExitCode -ne 0) { throw 'OFX installation failed. Cadence was not changed.' }
+            ('"' + $PSCommandPath + '"'), '-StageDirectory', ('"' + $StageDirectory.TrimEnd('\') + '"'), '-OfxOnly',
+            '-LogFile', ('"' + $elevatedLog + '"'))
+        Write-Host "UAC host: $powerShell64; working directory: $StageDirectory; script: $PSCommandPath; log: $elevatedLog"
+        try {
+            $process = Start-Process -FilePath $powerShell64 -WorkingDirectory $StageDirectory `
+                -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+        } catch {
+            throw "UAC start failed: host='$powerShell64'; directory='$StageDirectory'; script='$PSCommandPath'. $($_.Exception.Message)"
+        }
+        if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $elevatedLog) { Get-Content -LiteralPath $elevatedLog -Tail 40 -ErrorAction Continue | ForEach-Object { Write-Host $_ } }
+            throw "OFX installation failed (exit $($process.ExitCode)). Log: $elevatedLog. Cadence was not changed."
+        }
         Write-Host ('OFX installed: ' + (Join-Path $commonFiles64 'OFX/Plugins/ALEXZSilentFilm.ofx.bundle'))
     }
 

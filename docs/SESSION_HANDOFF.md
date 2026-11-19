@@ -1,5 +1,13 @@
 # Состояние проекта для нового диалога
 
+## Folder Setup: Start-Process path failure — подготовлен fix 2026-11-20
+
+Пользователь прислал install.log из ...sm75-89-folder/files: после Cadence default backend=cuda Start-Process завершился ERROR_PATH_NOT_FOUND; OFX installed/Installation complete нет. Старый лог не различает UAC host и VC redist Start-Process, битность тоже не записана; точную первопричину не объявлять установленной.
+
+✅ **2026-11-20 — подготовлен native installer bootstrap до UAC:** при x86 процессе script без повышения перезапускает себя через Sysnative в x64; RunAs затем получает физический System32 host, а не WOW64-only alias. Обоим Start-Process явно задан WorkingDirectory=payload. Есть preflight host existence, host/битность/payload/UAC script diagnostics, отдельный ProgramData elevated log и его tail при exit!=0. Source CheckLaunch диагностирует native host без установки/UAC; существующий реальный32битный PS regression проверяет такой переход и запрещает Sysnative в UAC host.
+
+**Новый Windows regression, UAC и Setup ещё не запускались агентом.** Следующий шаг — git pull и только Package-Standalone (stage75;89 сохраняется), затем повторить Setup из той же folder-папки; получить install.log с Installer host/UAC host/VC runtime. GTK runtime повторно не сжимается и C++/CUDA rebuild не требуется. Соседняя Bin Sync работа не включается.
+
 ## Windows WOW64: ResolvePython в неправильном Program Files — 2026-11-20
 
 Пользователь сообщил Cadence launch fail: Required file not found C:/Program Files (x86)/Blackmagic Design/DaVinci Resolve/ResolvePython/ResolvePython.exe. Он подтвердил фактическую установку Resolve в C:/Program Files/Blackmagic Design/DaVinci Resolve. Вывод также содержит старый общий GUI exit1 без Python traceback, не объявлять его доказанной отдельной причиной.

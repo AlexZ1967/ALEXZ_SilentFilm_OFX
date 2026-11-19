@@ -50,4 +50,13 @@ $env:SILENTFILM_RESOLVE_PYTHON = $custom
 Assert-MenuPython $custom
 & $menu -AppDirectory $app -ResolvePython $nativePython *> $null
 Assert-MenuPython $nativePython
+<# Проверка реального перехода x86 -> x64 без UAC и без файлов установки. #>
+$shell32 = Join-Path $env:SystemRoot 'SysWOW64/WindowsPowerShell/v1.0/powershell.exe'
+$diagnostic = & $shell32 -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $RepoRoot 'scripts/windows/Install-Windows.ps1') -CheckLaunch
+if ($LASTEXITCODE -ne 0) { throw 'Installer native host preflight failed.' }
+$hostInfo = $diagnostic | ConvertFrom-Json
+$expectedHost = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+if (!$hostInfo.is_64_bit -or $hostInfo.native_powershell -ne $expectedHost) {
+    throw "Installer passed an unsuitable host to UAC: $diagnostic"
+}
 Write-Host 'Windows launcher paths OK: real 32-bit process, native Program Files, environment and explicit overrides.'

@@ -107,6 +107,8 @@ Launcher предпочитает `runtime/ucrt64`, запускает Python с
 
 ## Приёмка на второй машине
 
+**Start-Process: системе не удаётся найти указанный путь:** установщик теперь сначала переходит в native64 PowerShell, затем выполняет UAC через физический System32 с явной рабочей папкой payload. В install.log записываются Installer host/UAC host/VC runtime; ошибки повышенной части дополнительно сохраняются в `%PROGRAMDATA%\ALEXZSilentFilm\install-logs`. После git pull достаточно повторить Package-Standalone и Setup, C++/CUDA не пересобирать. Изолированный regression проверяет32→64 bootstrap через read-only CheckLaunch; фактическое подтверждение UAC остаётся за пользователем.
+
 **Program Files (x86) в ошибке ResolvePython:** исправлен выбор native64 каталогов через ProgramW6432/CommonProgramW6432, launcher выбирает native PowerShell. После git pull повторить подготовку папки и Setup, чтобы обновились launcher и сгенерированное меню. Нестандартный ResolvePython остаётся доступен через -ResolvePython или SILENTFILM_RESOLVE_PYTHON. Переустанавливать Resolve при существующем корректном interpreter не требуется. Package-Standalone также запускает проверку меню в реальном32битном PowerShell с изолированными папками.
 
 1. На машине без MSYS2/Python/Toolkit скопировать всю папку с files, запустить Setup.exe; разрешить UAC.
