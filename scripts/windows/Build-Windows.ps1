@@ -8,10 +8,13 @@ param(
     [string]$MsysRoot = 'C:\msys64',
     [string]$CudaRoot = $env:CUDA_PATH,
     [ValidatePattern('^[0-9]+(;[0-9]+)*$')][string]$CudaArchitectures = '86',
-    [ValidateRange(1, 64)][int]$Jobs = 2
+    [ValidateRange(1, 64)][int]$Jobs = 2,
+    [switch]$Install,
+    [switch]$SkipInstallPrompt
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($Install -and $SkipInstallPrompt) { throw 'Choose either -Install or -SkipInstallPrompt.' }
 if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows x64.' }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $OfxIncludeDir = (Resolve-Path $OfxIncludeDir).Path
@@ -90,4 +93,13 @@ if ($Cadence) {
 }
 Write-Host "Bundle: $stage/ALEXZSilentFilm.ofx.bundle"
 Write-Host "Archive: $artifact"
-Write-Host 'No files were installed into Resolve. Check CTest output for skipped CUDA tests.'
+Write-Host 'Build and packaging complete. Check CTest output for skipped CUDA tests.'
+$installNow = $Install.IsPresent
+if (!$Install -and !$SkipInstallPrompt -and !$env:CI -and !$env:TF_BUILD -and
+    [Environment]::UserInteractive -and ![Console]::IsInputRedirected) {
+    $answer = Read-Host 'Install this build into Resolve now? Close Resolve and Cadence first [y/N]'
+    $installNow = $answer.Trim().ToLowerInvariant() -in @('y', 'yes')
+}
+if ($installNow) {
+    & (Join-Path $PSScriptRoot 'Install-Windows.ps1') -StageDirectory $stage -MsysRoot $MsysRoot
+} else { Write-Host 'Nothing was installed into Resolve. Run scripts/windows/Install-Windows.cmd later.' }

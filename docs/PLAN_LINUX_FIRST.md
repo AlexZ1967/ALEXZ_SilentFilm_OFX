@@ -2,6 +2,25 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-19 — подготовлены единый Windows installer и вопрос установки после успешной сборки/тестов/упаковки**, с UAC только для OFX, пользовательскими Cadence/menu и резервными копиями. [Инструкция](WINDOWS_INSTALLER.md).
+- [ ] Пользовательская проверка Windows installer: закрытый/открытый Resolve, отказ UAC, установка/повторная установка, CUDA GUI и OFX в host; новый installer пока не проверен.
+
+- [x] ✅ **2026-11-19 — Windows CUDA RTX2070/sm75: сборка96/96, CTest31/31 Passed за32.73с без Skipped; stage/ZIP OFX и Cadence созданы пользователем.** Resolve обновлён до21.1.2, CPU GUI открывается.
+- [x] ✅ **2026-11-19 — пользователь подтвердил CUDA-расчёт Cadence из GUI и импорт.** Установка OFX и ручная приёмка эффектов в Resolve остаются следующим шагом.
+
+- [x] ✅ **2026-11-19 — Windows CPU Cadence: повторная сборка17/17, CTest23/23 Passed за17.61с; stage/ZIP созданы пользователем.** Исправления TEMP и FFmpeg avdevice подтверждены. Следующий шаг — запуск GTK и ручная приёмка в Windows Resolve, затем CUDA.
+
+- [x] ✅ **2026-11-19 — Windows CPU Cadence скомпилирован пользователем50/50.** Из23тестов прошли17; подготовлены исправления canonical TEMP в fixtures и FFmpeg avdevice/lavfi. [Повторный запуск](WINDOWS_CADENCE_FIRST_BUILD_FIXES.md).
+- [x] ✅ **2026-11-19 — повторные Windows dependencies и Ninja -Cadence подтверждены:** CPU23/23; затем CUDA31/31.
+
+- [x] ✅ **2026-11-19 — MSYS2 UCRT64 GTK/Pango/Python установлены пользователем:** pacman84/84, hooks5/5, несмотря на timeout отдельных зеркал. Следующий шаг — импорт Gtk/Pango и CPU Cadence build через Ninja с -Cadence; запуск GUI ещё не подтверждён.
+
+- [x] ✅ **2026-11-19 — пользователь подтвердил Windows CPU OFX через Ninja:** MSVC19.39/x64, сборка40/40, CTest12/12 Passed за1.92с, stage/ZIP созданы. В Resolve ещё не установлен.
+- [x] ✅ **2026-11-19 — сборки -Cadence CPU/CUDA и GUI-расчёт подтверждены.** Приёмка установленного OFX ожидается.
+
+- [x] ✅ **2026-11-19 — Windows dependencies установлены пользователем:** FFTW, FFmpeg, OpenCV и Zstd, итог Cadence dependencies prepared.
+- [x] ✅ **2026-11-19 — блокировка сборки MSB4019 обойдена через Ninja.** Исправление Visual Studio Installer/отсутствующего props не подтверждено; рабочая сборка от MSBuild не зависит.
+
 - [x] ✅ **2026-11-18 — локальный коммит Windows OFX/Cadence и TemporalProbe:** `2e05132`; Linux32/32 Passed.
 - [x] ✅ **2026-11-18 — push восстановлен и подтверждён:** `b042f66 → 3326d7d`, через разовый прямой адрес с проверкой официального SSH key. Пользовательский ключ работает; локальное разрешение github.com ведёт на другой сервер. Системные настройки не менялись.
 

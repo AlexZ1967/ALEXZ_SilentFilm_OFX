@@ -1,5 +1,9 @@
 # Windows: сборка через Ninja при ошибке MSBuild
 
+✅ **2026-11-19 — полный Cadence подтверждён пользователем:** CPU23/23, CUDA31/31 без Skipped, расчёт GUI работает на RTX2070/Resolve Studio21.1.2. После успешной сборки теперь предлагается [установка одной командой](WINDOWS_INSTALLER.md); сам установщик ещё ждёт проверки. Более ранние пометки ниже отражают историю этапа.
+
+✅ **2026-11-19 — Windows CPU OFX подтверждён пользовательским логом:** MSVC19.39.33523.0/x64, configure/generate, сборка40/40, CTest12/12 Passed за1.92с и упаковка. Проверен wrapper из ae751a6 без -Cadence/-Cuda. Полный Cadence, CUDA и запуск в Resolve пока не проверены; прежние пометки «не проверено» ниже относятся к моменту подготовки.
+
 ✅ **2026-11-19 — подготовлен дополнительный способ сборки.** Windows-запуск/компиляция этой ветки ещё не проверены. Он предназначен для случая MSB4019 с отсутствующим `Microsoft.VCRedistVersion.default.props`, когда MSVC установлен и работает, а сборка Visual Studio generator не может прочитать side-by-side `.props`.
 
 В пользовательском логе vcpkg успешно собрал FFTW/FFmpeg/OpenCV через MSVC14.39. Поэтому можно попробовать тот же компилятор с генератором Ninja, которому не нужна конфигурация проекта MSBuild. Это обход проблемы сборки, а не восстановление самого Visual Studio Installer. [Microsoft о command-line MSVC](https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170), [генератор CMake Ninja](https://cmake.org/cmake/help/latest/generator/Ninja.html).

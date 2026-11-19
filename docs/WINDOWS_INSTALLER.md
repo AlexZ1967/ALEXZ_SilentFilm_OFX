@@ -1,0 +1,58 @@
+# Установка в Resolve одной командой
+
+✅ **2026-11-19 — подготовлены единый Windows-установщик и предложение установки после успешной сборки.** Установщик на Windows ещё не проверен. До его добавления пользователь подтвердил CPU23/23, CUDA31/31 и расчёт Cadence из GUI на RTX2070/Resolve Studio21.1.2.
+
+## После сборки
+
+После сборки, CTest и создания ZIP `Build-Windows-Ninja.cmd` спрашивает:
+
+```text
+Install this build into Resolve now? Close Resolve and Cadence first [y/N]
+```
+
+Закройте Resolve и Cadence, введите **y**, нажмите Enter. Разрешите копирование OFX в запросе Windows. Enter без ответа оставляет готовый пакет без установки.
+
+Для автоматизации доступны `-SkipInstallPrompt` (только сборка) и `-Install` (установка после успешных сборки, тестов и упаковки без дополнительного вопроса; UAC сохраняется). Параметры взаимоисключающие. В CI и при перенаправленном вводе вопрос не задаётся.
+
+## Установить ранее собранную версию
+
+Закройте Resolve и Cadence. В обычном PowerShell выполните **одной строкой**:
+
+```powershell
+& 'C:\work\ALEXZ_SilentFilm_OFX\scripts\windows\Install-Windows.cmd' -StageDirectory 'C:\work\ALEXZ_SilentFilm_OFX\build-windows-cadence-cuda-ninja\stage'
+```
+
+Либо откройте `scripts\windows\Install-Windows.cmd` двойным щелчком в Проводнике. Без параметра установщик покажет найденные stage-каталоги; выберите номер нужной CPU/CUDA-сборки. Он устанавливает готовый пакет, не запускает сборку и не заменяет проверку тестов.
+
+Запускайте установщик от своего обычного пользователя. Он попросит права администратора **только для OFX**. Даже если в UAC введены данные другого администратора, Cadence и меню устанавливаются исходным процессом. Если открыть весь установщик под другой учётной записью, пользовательская часть будет относиться к ней.
+
+## Что устанавливается
+
+- Полный OFX bundle с CUDA DLL — в `C:\Program Files\Common Files\OFX\Plugins\ALEXZSilentFilm.ofx.bundle`.
+- Полное Cadence-приложение — в `%LOCALAPPDATA%\Programs\ALEXZSilentFilm\SilentFilmCadence`.
+- Пункт **Workspace → Scripts → Utility → SilentFilm Cadence** — в пользовательскую папку скриптов Resolve.
+- Backend из `cadence_runtime.json`: **cuda для CUDA-пакета**, cpu для CPU-пакета. При нестандартном MSYS2 добавьте `-MsysRoot 'D:\msys64'`.
+
+MSYS2, CUDA Toolkit, драйвер, Resolve и External scripting → Local установщик не устанавливает и не перенастраивает. После завершения запустите Resolve вручную. Интеграция Cadence рассчитана на Studio21.1+; OFX ищите по слову SilentFilm в Color → Effects.
+
+## Обновление и восстановление
+
+Сначала пакет копируется во временный каталог, затем заменяет установленную папку. Старые версии сохраняются вне OFX Plugins, чтобы Resolve не сканировал дубликаты:
+
+- OFX: `%PROGRAMDATA%\ALEXZSilentFilm\backups\OFX\<дата-id>\ALEXZSilentFilm.ofx.bundle`.
+- Cadence: `%LOCALAPPDATA%\Programs\ALEXZSilentFilm\backups\<дата-id>\SilentFilmCadence`.
+- Меню: `%LOCALAPPDATA%\ALEXZSilentFilm\cadence\menu-backups`.
+
+При ошибке замены компонента установщик пытается вернуть его предыдущую папку. OFX и приложение устанавливаются последовательно: если OFX установлен, а Cadence затем не удалось установить, OFX остаётся обновлённым. При отказе UAC пользовательское приложение не обновляется.
+
+Старые папки вроде `C:\work\SilentFilmCadence`, созданные вручную, не удаляются. Рабочие задания, кэш, карты экспозиции и пользовательские пресеты не очищаются.
+
+## Ручная проверка на Windows
+
+1. С открытым Resolve установщик должен остановиться до копирования, не закрывая Resolve.
+2. С закрытыми Resolve/Cadence отменить UAC: получить ошибку без изменения Cadence.
+3. Повторить и разрешить UAC. Проверить bundle с CUDA DLL, приложение в LocalAppData и пункт меню; выполнить короткий CUDA-расчёт.
+4. Повторить установку: предыдущие папки должны сохраниться вне Plugins, меню — ссылаться на новое приложение.
+5. При следующей сборке проверить ответ **N** и **y**. При ошибке CTest вопрос установки появляться не должен.
+
+Пункты ожидают пользовательского прогона; агент Windows-команды, UAC и Resolve не запускал.

@@ -1,5 +1,65 @@
 # Состояние проекта для нового диалога
 
+## Единый Windows installer — подготовлен 2026-11-19
+
+✅ **2026-11-19 — реализованы Install-Windows.cmd/ps1 и предложение установки после успешных build/CTest/stage/ZIP.** OFX копируется отдельно повышенным процессом (UAC), Cadence/Utility menu исходным пользователем в LocalAppData/Programs/ALEXZSilentFilm. CUDA default сохраняется из пакета. Старые папки выносятся в backups вне Plugins; временное копирование до замены и возврат предыдущей папки при ошибке. Открытый Resolve/Cadence не закрываются принудительно: требуется закрыть вручную. Build -Install/-SkipInstallPrompt, CI/redirected input без вопроса. Документация и ручные проверки — WINDOWS_INSTALLER.md. Windows installer ещё не запускался, новые изменения не выдавать за PASS; агент проверки не выполнял. Соседняя Bin Sync/tools работа сохраняется.
+
+## Windows CUDA Cadence: ручной расчёт подтверждён — 2026-11-19
+
+✅ **2026-11-19 — пользователь подтвердил «всё работает» после запуска packaged CUDA App с -Backend cuda и предложенной проверки расчёта/импорта.** Следующий запрос — установить приложение в меню Resolve с CUDA по умолчанию и подключить OFX. Проверены исходники: CUDA build записывает backend=cuda в cadence_runtime.json; Install-Cadence-Menu запускает launcher с auto, который читает этот файл. Подготовлены пользовательские команды копирования полного app в C:/work/SilentFilmCadence, установки пользовательского Utility menu и отдельного копирования OFX bundle с CUDA DLL в Common Files/OFX/Plugins при закрытом Resolve. Эти операции на Windows агент не выполняет; фактическая установка/OFX host acceptance ещё не подтверждены.
+
+## Windows CUDA: 31/31 Passed — подтверждено 2026-11-19
+
+✅ **2026-11-19 — пользователь подтвердил CUDA-сборку через Ninja:** RTX2070/8GiB, архитектура75, nvcc13.0.88, драйвер610.62, MSVC14.39. Сборка96/96, **CTest31/31 Passed за32.73с, без Skipped**, включая8CUDA parity. Созданы stage/ZIP OFX и Cadence, cufft64_12.dll и nvJitLink_130_0.dll включены в оба комплекта. Каталог `build-windows-cadence-cuda-ninja/stage`. Установки в Resolve ещё не было. Следующий шаг пользователя — запустить CUDA packaged app с -Backend cuda и проверить расчёт/импорт на коротком клипе; затем установка OFX и ручная приёмка в Resolve. Агент сборок/тестов не запускал.
+
+✅ **2026-11-19 — пользователь обновил Windows Resolve Studio20.0.1 до21.1.2 и подтвердил открытие CPU GUI.** Ошибка пустого AppDirectory устранена014d169; отсутствие ResolvePython объяснялось прежней версией20.0.1. Подключение к реальному таймлайну и расчёт из GUI пока не подтверждены. CPU23/23 и WindowsCUDA31/31 подтверждают автоматические проверки, не host acceptance.
+
+## Windows GUI launcher: пустой AppDirectory — 2026-11-19
+
+После успешных23/23 пользователь запустил packaged Start-Cadence.cmd, но PowerShell остановился с Cannot bind argument to parameter Path because it is an empty string. В Start-Cadence.ps1 и Install-Cadence-Menu.ps1 убран PSScriptRoot из param defaults: значение назначается в теле скрипта, Resolve-Path использует LiteralPath. Это известный случай powershell.exe -File (PowerShell issue4688). Подготовлен source fix; Windows-запуск после него ещё не подтверждён, агент проверки не запускал. Пользователь получает git pull, cmake --install существующей сборки (без компиляции и dependency rebuild), затем повторный запуск .cmd. Соседняя работа Bin Sync и смешанные docs сохраняются.
+
+## Windows CPU Cadence: 23/23 Passed — подтверждено 2026-11-19
+
+✅ **2026-11-19 — пользователь прислал успешный повторный лог Ninja -Cadence:** configure/generate, сборка17/17, **CTest23/23 Passed за17.61с**, stage и оба ZIP созданы. Перед этим FFmpeg с avdevice подготовлен за28мин. Прежние6падений устранены по фактическому Windows-прогону. Пакет приложения: `build-windows-cadence-cpu-ninja/stage/SilentFilmCadence/Start-Cadence.cmd`; OFX bundle рядом в stage. В Resolve ничего не установлено.
+
+В логе остаются C4244 внутри внешнего libavutil/common.h и C4458 (параметр aspect скрывает член FrameWriter::Impl). Это предупреждения, не ошибки сборки; код по ним не менялся. Следующий шаг пользователя — запуск packaged GTK app, затем меню/API и ручной расчёт в Windows Resolve. Windows CUDA пока не проверена: текущий прогон CPU. Агент сборки/тесты не запускал.
+
+## Windows CPU Cadence: сборка50/50, исправления тестов — 2026-11-19
+
+✅ **2026-11-19 — исправления опубликованы коммитом `b4780d7`**, push `ae751a6 → b4780d7` подтверждён Git. Включены только Windows package/dependency script, три test fixtures и отдельная инструкция; соседние Bin Sync/tools и смешанные незакоммиченные документы сохранены.
+
+✅ **2026-11-19 — по пользовательскому логу подтверждена полная компиляция CPU Cadence через Ninja:** сборка50/50; CTest17/23 Passed,6Failed,9.57с. Упаковка не запущена. Три Python-набора упали из-за сравнения короткого Windows TEMP `DDB98~1.ANT` с каноническим `d.antropov`; три интеграционных — из-за отсутствующего lavfi в FFmpeg.
+
+Подготовлены canonical TEMP roots в трёх test fixtures и FFmpeg feature avdevice с --recurse в Prepare-Cadence-Dependencies.ps1. Windows CMake при BUILD_TESTING проверяет lavfi до сборки. Production path resolution и математика не менялись, тесты не отключены. Агент повторные проверки не запускал. Следующий шаг пользователя — обновить исходники, повторить Prepare (FFmpeg пересоберётся), затем Ninja -Cadence; [команды и статус](WINDOWS_CADENCE_FIRST_BUILD_FIXES.md). Запуск GTK/Resolve и Windows CUDA пока не подтверждены.
+
+## Windows GTK/Pango runtime: пакеты установлены — 2026-11-19
+
+✅ **2026-11-19 — пользователь прислал полный успешный вывод pacman в MSYS2 UCRT64:** установлены84/84пакета, проверены keys/integrity/conflicts, завершены5/5post-transaction hooks. В том числе GTK4.24.1, Python3.14.10, PyGObject3.58.1, Pango1.58.2. При загрузке были timeout отдельных mirror.msys2.org/repo.msys2.org и dependency-cycle warnings, но конечная транзакция прошла; повторная установка только из-за этих строк не требуется.
+
+Это подтверждает установку пакетов, не GUI/runtime приложения. Следующий шаг пользователя — короткая проверка импорта Gtk/Pango в UCRT64, затем в обычном PowerShell `Build-Windows-Ninja.cmd ... -Cadence` (CPU) и полный лог. OFX CPU12/12 уже подтверждён ранее; native Cadence Windows, CUDA и Resolve всё ещё ждут проверки. Агент установки/проверки на Windows не выполнял.
+
+## Windows CPU OFX через Ninja — подтверждён 2026-11-19
+
+✅ **2026-11-19 — по полному пользовательскому логу подтверждён `Build-Windows-Ninja.cmd` без -Cadence/-Cuda.** git pull обновил Windows до `ae751a6`; vcvarsall подготовил x64, выбран MSVC14.39.33519/Hostx64/x64, CMake определил MSVC19.39.33523.0. Configure/generate прошли (4.7с/0.1с), сборка40/40, **CTest12/12 Passed, 1.92с**, упаковка успешна. Bundle: `build-windows-cpu-ninja/stage/ALEXZSilentFilm.ofx.bundle`; ZIP: `build-windows-cpu-ninja/ALEXZSilentFilm-windows-x64-cpu-ninja.zip`. Установки в Resolve не было.
+
+Предупреждения C4456 clean/shadow, C4996 fopen/getenv и unused-cli VCPKG_OVERLAY_TRIPLETS не остановили этот прогон. Исправлений по ним не выполнялось. Это подтверждение MSVC CPU core/OFX/preset storage/lifecycle и Ninja wrapper; не Windows Cadence.exe/FFmpeg/OpenCV integration, не CUDA и не host/runtime Resolve. Следующий шаг — проверить наличие MSYS2 UCRT64 Python/GTK и запустить тот же wrapper с **-Cadence**; далее GPU и установка/ручная приёмка. Агент Windows-команды не выполнял: вывод прислан пользователем в attachment. Сбой MSBuild/Installer не устранён, рабочий обход Ninja подтверждён.
+
+## Windows: обход MSBuild через Ninja — подготовлен 2026-11-19
+
+✅ **2026-11-19 — опубликован `ae751a6`**, push `0707354 → ae751a6` подтверждён Git. В коммит вошли только Windows build script/wrapper и отдельная Ninja-инструкция/ссылка из setup; соседние незакоммиченные документы и tools/Bin Sync не включались.
+
+✅ **2026-11-19 — добавлены `Build-Windows-Ninja.cmd` и `Build-Windows.ps1 -Generator Ninja`.** После MSB4019 (отсутствующий VCRedistVersion props) пользователь сообщил о пустом/непоявляющемся Installer. Последний bootstrap log3.14.2094.42856 показывает только Finished detecting existing VS/.NET, не содержит причины отказа UI. Поэтому подготовлен независимый путь к основной цели: vcvarsall x64/MSVC14.39 → Ninja → CMake/build/CTest/stage. Wrapper работает в дочернем CMD, PowerShell проверяет x64/14.39/первый cl.exe и Ninja; для CUDA задаёт nvcc/host compiler явно. Старые VisualStudio build-каталоги не меняются, Ninja получает суффикс -ninja. [Команды для пользователя](WINDOWS_NINJA_BUILD.md).
+
+**Не проверено:** wrapper, Windows configure/build/CTest, CUDA Ninja. Linux и установленный SDK/VS/Resolve не менялись; обычная VisualStudio ветка сохранена. Следующий шаг — пользователь открывает обычный PowerShell, обновляет исходники, выполняет CPU OFX wrapper и присылает лог; затем Cadence/CUDA. Installer остаётся отдельной нерешённой проблемой, Ninja не объявлять его исправлением. Соседняя незакоммиченная работа Bin Sync/tools и прежние изменения handoff/плана сохраняются.
+
+## Windows: зависимости установлены, MSBuild заблокирован — 2026-11-19
+
+✅ **2026-11-19 — по пользовательскому логу подтверждена установка Windows Cadence dependencies:** FFTW3.3.11/x64-silentfilm (1.7мин), затем FFmpeg9.0.2/OpenCV4.14.0/Zstd1.5.7 и вспомогательные пакеты/x64-silentfilm-media; итог «All requested installations completed successfully in:21min» и «Cadence dependencies prepared». Это подтверждение зависимостей, не сборки нашего проекта. В ходе загрузок были Schannel CRYPT_E_REVOCATION_OFFLINE, медленные/недоступные MSYS mirrors; применён пользователем процессный VCPKG_SSL_REVOKE_BEST_EFFORT=1 и ручной кэш архива.
+
+Первый `Build-Windows.ps1` без -Cadence (CPU OFX) дошёл до CMake project(), но не определил CXX compiler. Полный пользовательский `CMakeConfigureLog.yaml` прочитан агентом с явно указанного пути `/home/alex/Documents/CMakeConfigureLog.yaml` (только чтение, не включать в Git). Точная причина — **MSB4019**: `VC/Auxiliary/Build/14.39.17.9/Microsoft.VCToolsVersion.14.39.17.9.props` импортирует отсутствующий соседний `Microsoft.VCRedistVersion.default.props`. MSBuild17.14.60; SDK10.0.26100.0/Windows target10.0.19045. Последние160строк были лишь поиском lib.exe, поэтому сами по себе не показывали причину; x86 PATH не объявлен доказанной причиной.
+
+Следующий шаг — пользователь выполняет Repair для Build Tools2022 через Visual Studio Installer, проверяет выбранный компонент MSVC14.39 и повторяет CPU build в новом Developer PowerShell. Нельзя выдавать рекомендацию Repair за уже выполненное исправление: результата пока нет. Не копировать .props между версиями вручную. Агент Windows-сборки/установки/Resolve не запускал; исходники вычислений и build scripts не изменены этим диагностическим шагом. После CPU configure/build/CTest — Cadence CPU/CUDA и ручная приёмка Resolve.
+
 ## Публикация восстановлена — 2026-11-18
 
 ✅ **2026-11-18 — push успешно выполнен:** `origin/main` обновлён `b042f66 → 3326d7d`, включая основной коммит `2e05132` Windows OFX/Cadence/TemporalProbe. Прежняя блокировка публикации устранена для этой отправки.

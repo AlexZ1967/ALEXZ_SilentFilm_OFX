@@ -508,6 +508,7 @@ Crank Exposure отдельно требует файла **Exposure Map** из 
 | `git` или `cmake` не распознаны | Проверить установку/PATH, закрыть терминал и открыть новый Developer PowerShell |
 | `cl` не распознан | Открыть именно Developer PowerShell for VS 2022; проверить C++ workload |
 | Не найден toolset `14.39` | Visual Studio Installer → Modify → Individual components → добавить 14.39 |
+| `MSB4019`, не найден `Microsoft.VCRedistVersion.default.props` | Visual Studio Installer → Build Tools2022 → More/Дополнительно → Repair/Восстановить; затем проверить компонент14.39 и повторить сборку в новом Developer PowerShell. Не копировать .props между toolset вручную. |
 | `Build-Windows.ps1` не найден | Перейти в папку проекта; проверить наличие Windows-файлов в скачанной ревизии |
 | Запуск сценариев запрещён | В этом окне выполнить `Set-ExecutionPolicy -Scope Process RemoteSigned`; при политике организации обратиться к администратору |
 | Скачанный сценарий требует подписи | Для доверенного ZIP открыть его «Свойства», использовать «Разблокировать», если пункт есть, затем распаковать заново; не отключать защиту всего компьютера |
