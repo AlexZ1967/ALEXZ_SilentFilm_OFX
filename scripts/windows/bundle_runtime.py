@@ -2,6 +2,7 @@
 
 import argparse
 from collections import defaultdict, deque
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -132,7 +133,49 @@ class RuntimePlan:
             shutil.copy2(self.prefix / relative, target)
         manifest = [{"path": path.as_posix(), "bytes": sizes[path], "reasons": sorted(self.files[path])} for path in sorted(self.files)]
         (destination.parent / "runtime-files.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        (destination.parent / "runtime-cache.json").write_text(json.dumps(self.cache_key(), sort_keys=True), encoding="utf-8")
         print("Runtime files copied; no toolchain, headers, static libraries or unrelated site-packages.", flush=True)
+
+    def cache_key(self):
+        """Identify the recipe and selected source files independently of app scripts."""
+        files = {}
+        for path in sorted(self.files):
+            stat = (self.prefix / path).stat()
+            files[path.as_posix()] = [stat.st_size, stat.st_mtime_ns]
+        return {"recipe": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "prefix": str(self.prefix), "files": files}
+
+    def matches_cache(self, destination):
+        """Reuse a copied runtime only while its source and destination files agree."""
+        try:
+            cache_path = destination.parent / "runtime-cache.json"
+            current = self.cache_key()
+            legacy = not cache_path.is_file()
+            if legacy:
+                previous = json.loads((destination.parent / "runtime-files.json").read_text(encoding="utf-8"))
+                if {item["path"] for item in previous} != set(current["files"]):
+                    return False
+                cached = current
+            else:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached != current:
+                return False
+            actual = set()
+            for directory, names, files in os.walk(destination, followlinks=False):
+                names[:] = [name for name in names if name != "__pycache__"]
+                actual.update((Path(directory) / name).relative_to(destination).as_posix()
+                              for name in files if not name.endswith((".pyc", ".pyo")))
+            if actual != set(cached["files"]):
+                return False
+            for relative, (size, modified) in cached["files"].items():
+                stat = (destination / relative).stat()
+                if (stat.st_size, stat.st_mtime_ns) != (size, modified):
+                    return False
+            if legacy:
+                cache_path.write_text(json.dumps(current, sort_keys=True), encoding="utf-8")
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
 
 
 def collect_typelibs(plan):
@@ -158,6 +201,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--cached-runtime", type=Path)
     args = parser.parse_args()
     prefix = args.prefix.resolve()
     if os.name != "nt" or Path(sys.prefix).resolve() != prefix:
@@ -192,6 +236,9 @@ def main():
         if path.is_file():
             plan.add(path, "file chooser MIME metadata")
     plan.close_dependencies()
+    if args.cached_runtime and plan.matches_cache(args.cached_runtime):
+        print("Runtime cache hit: Python/GTK unchanged; no runtime files copied.", flush=True)
+        raise SystemExit(10)
     plan.copy(args.destination)
     dll_directory.close()
 

@@ -1,5 +1,15 @@
 # Состояние проекта для нового диалога
 
+## Setup.exe + files без компрессии — подготовлен 2026-11-20
+
+По запросу пользователя default Standalone теперь папка ...-folder/Setup.exe + files. Inno ExternalPayload mode не встраивает payload и вызывает общий installer непосредственно из {src}/files, без предварительного копирования всего payload в Temp. На другую машину переносится вся папка. SingleExe оставлен отдельным opt-in Package/Build (-Standalone -SingleExe). Внешний Setup проверяет наличие соседнего payload перед запуском.
+
+Незавершённое обновление folder-комплекта помечено .packaging-in-progress; Setup отказывается запускаться, пока подготовка не завершится. Install-Windows теперь копирует только bin/scripts/presets/runtime и известные root launchers/config/docs, исключая осиротевшие .runtime/backup-папки stage даже при обычном post-build install.
+
+✅ **2026-11-20 — подготовлены incremental payload sync и runtime reuse:** robocopy только генерируемых подкаталогов пропускает неизменные файлы, удаляет устаревшие; runtime-cache учитывает hash рецепта/выбранные source sizes+mtime и проверяет destination набор/sizes+mtime, допускает adoption старого корректного manifest. При app script changes runtime не копируется, smoke остаётся. Малый Setup.exe кешируется по версии/шаблону/компилятору; при app changes обновляются только files и metadata. VC redist не копируется в stage повторно без изменения. Добавлены2cache tests к прежним6 (ожидается8), их агент не запускал.
+
+**НЕ ПРОВЕРЕНО:** новый folder Setup/Inno без embedded Files, cache hit на Windows, повторный sync и target install. Следующий шаг пользователя — git pull и прежняя Package-Standalone команда без SingleExe: новая папка создаётся один раз; повторный запуск должен дать Runtime cache hit и Setup.exe unchanged. Весь stage/runtime удалять не нужно. Старый75stage остаётся75; будущая75;89 сборка дляRTX4070Ti задаётся явно. SDK/Comfy/ядро не менялись.
+
 ## Компактный runtime: smoke подтверждён, GLibWin32 добавлен — 2026-11-20
 
 ✅ **2026-11-20 — пользовательский Package-Standalone log подтвердил:**5PE tests OK за0.201с; runtime3688files/106.7MiB/137PE; relocated Python3.14.10, Gtk4.24, Pango1.58.2, fonts185, Runtime OK. Inno дошёл до77.34% compression; итоговый Setup ещё не подтверждён этим фрагментом.

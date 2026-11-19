@@ -1,6 +1,8 @@
 """Check PE dependency closure and exclusion of development files without Windows."""
 
 from pathlib import Path
+from contextlib import redirect_stdout
+import io
 import struct
 import sys
 import tempfile
@@ -121,6 +123,38 @@ class PeDependencies(unittest.TestCase):
             collect_typelibs(plan)
         repository.require.assert_any_call("GLibWin32", "2.0")
         self.assertIn(Path("lib/girepository-1.0/GLibWin32-2.0.typelib"), plan.files)
+
+    def test_cache_reuses_runtime_for_app_changes_but_rejects_native_changes(self):
+        entry = self.binary("python.exe")
+        plan = RuntimePlan(self.prefix, self.system)
+        plan.add(entry, "interpreter")
+        plan.close_dependencies()
+        destination = self.root / "packaged/runtime/ucrt64"
+        with redirect_stdout(io.StringIO()):
+            plan.copy(destination)
+        self.assertTrue(plan.matches_cache(destination))
+        (self.root / "cadence_app.py").write_text("changed GUI code", encoding="utf-8")
+        self.assertTrue(plan.matches_cache(destination))
+        entry.write_bytes(image() + b"changed runtime")
+        self.assertFalse(plan.matches_cache(destination))
+
+    def test_cache_checks_missing_files_and_adopts_an_existing_manifest(self):
+        entry = self.binary("python.exe")
+        plan = RuntimePlan(self.prefix, self.system)
+        plan.add(entry, "interpreter")
+        plan.close_dependencies()
+        destination = self.root / "packaged/runtime/ucrt64"
+        with redirect_stdout(io.StringIO()):
+            plan.copy(destination)
+        (destination.parent / "runtime-cache.json").unlink()
+        self.assertTrue(plan.matches_cache(destination))
+        self.assertTrue((destination.parent / "runtime-cache.json").is_file())
+        extra = destination / "bin/gcc.exe"
+        extra.write_bytes(image())
+        self.assertFalse(plan.matches_cache(destination))
+        extra.unlink()
+        (destination / "bin/python.exe").unlink()
+        self.assertFalse(plan.matches_cache(destination))
 
 
 if __name__ == "__main__":

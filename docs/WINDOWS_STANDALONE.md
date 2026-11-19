@@ -1,19 +1,21 @@
 # Автономный Windows-пакет Cadence и OFX
 
+✅ **2026-11-20 — по запросу пользователя формат по умолчанию изменён на Setup.exe + files без сжатия payload.** Повторная подготовка синхронизирует изменённые файлы; Python/GTK-runtime и небольшой Setup.exe переиспользуются при неизменных источниках. Новый формат и кэш ещё требуют Windows-проверки. Прежний компактный runtime уже подтвердил5PE tests и smoke:106.7MiB; затем добавлен GLibWin32 fix и дополнительные тесты.
+
 ✅ **2026-11-20 — полное копирование UCRT64 заменено отбором runtime-зависимостей.** Причина — пользователь сообщил о чрезмерно долгой упаковке и лишних файлах. Новый отбор и его PE-тесты подготовлены, но ещё не запускались агентом. Пользователь останавливает старую упаковку; весь stage удалять не нужно.
 
 ✅ **2026-11-19 — подготовлена сборка одного Setup.exe.** Новый pipeline упаковки и установка на машине без MSYS2 пока не проверены. Прежние31/31 CUDA-тест и ручной расчёт относятся к обычной Windows-сборке, не подтверждают переносимость нового runtime.
 
 ## Что получает вторая машина
 
-Один `ALEXZSilentFilm-Setup-…exe`. Запустить двойным щелчком из обычной учётной записи, закрыв Resolve и Cadence. Мастер распакует пакет, запросит UAC для Visual C++ Runtime/OFX и установит:
+Папку `ALEXZSilentFilm-Setup-…-folder`, содержащую небольшой `Setup.exe` и каталог `files`. Перенести **всю папку** на локальный диск второй машины. Запустить Setup.exe двойным щелчком из обычной учётной записи, закрыв Resolve и Cadence. Мастер копирует файлы из соседнего files сразу в места установки, без предварительного распаковывания payload во временный каталог; запросит UAC для Visual C++ Runtime/OFX и установит:
 
 - Cadence с Python, GTK4, Pango, Cairo, typelibs, темами, переводами и лицензиями;
 - native helper с FFmpeg/OpenCV и CUDA DLL;
 - Visual C++ x64 Runtime из подписанного дистрибутива Microsoft;
 - OFX bundle и пункт Workspace → Scripts → Utility → SilentFilm Cadence.
 
-MSYS2, Python, Visual Studio, CMake, vcpkg, CUDA Toolkit и Inno Setup **на второй машине не нужны**. Нужны подходящие Windows x64, драйвер NVIDIA для CUDA-пакета и Resolve Studio21.1+ с External scripting → Local. Их установщик не заменяет. Модель GPU должна соответствовать архитектурам пакета; сведения записываются в package-info.json и имя Setup.exe.
+MSYS2, Python, Visual Studio, CMake, vcpkg, CUDA Toolkit и Inno Setup **на второй машине не нужны**. Нужны подходящие Windows x64, драйвер NVIDIA для CUDA-пакета и Resolve Studio21.1+ с External scripting → Local. Их установщик не заменяет. Модель GPU должна соответствовать архитектурам пакета; сведения записываются в package-info.json и имя папки комплекта.
 
 Новая версия сохраняет предыдущие компоненты по правилам [общего установщика](WINDOWS_INSTALLER.md). Задания, кэш и пресеты не удаляются. Runtime Cadence находится только в папке приложения; GTK/Python не загружаются в процесс Resolve. Мастер не добавляет системный PATH и не запускает Resolve автоматически.
 
@@ -47,14 +49,20 @@ curl.exe --fail --location --ssl-revoke-best-effort --output C:\work\vc_redist.x
 & 'C:\work\ALEXZ_SilentFilm_OFX\scripts\windows\Build-Windows-Ninja.cmd' -OfxIncludeDir 'C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\OpenFX\OpenFX-1.4\include' -VcpkgRoot 'C:\work\vcpkg' -Cadence -Cuda -CudaRoot 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0' -CudaArchitectures 75 -Standalone -VcRedistPath 'C:\work\vc_redist.x64.exe' -SkipInstallPrompt
 ```
 
-Если redist находится автоматически, `-VcRedistPath ...` можно убрать. `-Standalone` добавляет упаковку после успешных build/CTest/stage и создаёт только Setup.exe, без промежуточного сжатия ZIP (в том числе старого большого runtime). Ошибка проверки runtime или компилятора Inno останавливает создание нового установщика. Обычная команда без -Standalone сохраняет прежнюю ZIP-упаковку; для переноса автономного комплекта нужен именно Setup.exe.
+Если redist находится автоматически, `-VcRedistPath ...` можно убрать. `-Standalone` после успешных build/CTest/stage создаёт папку Setup.exe + files, без ZIP и без сжатия payload. Ошибка проверки runtime или компилятора Inno останавливает подготовку нового комплекта. Обычная команда без -Standalone сохраняет прежнюю ZIP-упаковку.
 
 Для нескольких GPU можно передать, например, `-CudaArchitectures '75;86;89'`. Сборка будет дольше; работа других GPU не подтверждается тестами на RTX2070. Сначала уточнить модель GPU и драйвер второй машины.
 
 Ожидаемый результат для этого примера:
 
 ```text
-C:\work\ALEXZ_SilentFilm_OFX\build-windows-cadence-cuda-ninja\ALEXZSilentFilm-Setup-build-windows-cadence-cuda-ninja-sm75.exe
+C:\work\ALEXZ_SilentFilm_OFX\build-windows-cadence-cuda-ninja\ALEXZSilentFilm-Setup-build-windows-cadence-cuda-ninja-sm75-folder\
+  Setup.exe
+  files\
+    ALEXZSilentFilm.ofx.bundle\
+    SilentFilmCadence\
+    prerequisites\
+    Install-Windows.ps1
 ```
 
 ## Упаковка ранее собранного stage
@@ -67,6 +75,20 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File 'C:\work\ALEXZ_Sil
 
 Упаковщик обновляет scripts/launcher из текущих исходников и добавляет runtime в stage. Исходный MSYS2 не изменяет. Сохранённые ZIP и старый Setup.exe автоматически не объявляются проверенными или актуальными при ошибке нового запуска.
 
+## Повторные обновления без перекомпрессии
+
+Повторить ту же команду Package-Standalone. Runtime выбирается и проверяется; если рецепт отбора, выбранные исходные файлы и существующая копия не изменились, выводится `Runtime cache hit` и DLL/Python повторно не копируются. Кэш сравнивает набор, размеры и времена изменения файлов; отсутствующий, лишний либо изменённый runtime-файл заставляет пересобрать runtime. Старый корректный runtime с manifest может быть принят без повторного копирования. Проверка GTK/Pango остаётся при каждом запуске.
+
+Каталог files обновляется через robocopy: копируются изменённые файлы и удаляются устаревшие внутри генерируемых подкаталогов. Не храните там личные файлы. При неизменных версии пакета, Inno-компиляторе и шаблоне установщика сам Setup.exe также переиспользуется; меняются только payload и metadata. Поэтому изменение cadence_app.py не требует сжатия всего runtime. Первый выпуск folder-комплекта один раз копирует файлы в новую папку.
+
+Для переноса копируйте всю папку комплекта, а не отдельно Setup.exe. Мастер проверяет наличие соседнего files. Не удаляйте files между обычными обновлениями на машине сборки — это лишит синхронизацию возможности пропускать неизменные файлы.
+
+Во время синхронизации есть `.packaging-in-progress`: Setup.exe отказывается устанавливать такой незавершённый комплект. Маркер снимается только после успешной подготовки; если процесс прерван, повторите ту же команду упаковки.
+
+## Необязательный один сжатый EXE
+
+Если всё-таки нужен один переносимый файл, добавьте `-SingleExe` к Package-Standalone либо `-Standalone -SingleExe` к Build-Windows. Это прежний режим: payload встраивается и сжимается; при каждом таком выпуске сжатие выполняется заново. По умолчанию этот режим выключен.
+
 ## Как проверяется переносимость
 
 `bundle_runtime.py` отбирает Python stdlib без тестов/Tk/IDLE/pip и только GUI-пакеты gi/cairo. Метаданные GIRepository задают набор typelibs GTK/Pango и их зависимостей. DLL собираются по обычным и delay-load PE imports, а также по динамическим именам библиотек в typelibs. Добавляются PNG/SVG/JPEG загрузчики, темы/значки, схемы, fontconfig, русский перевод и лицензии. Компиляторы, SDK, include, статические библиотеки и посторонние site-packages не копируются. Системные Windows DLL не переносятся с компьютера сборки.
@@ -77,7 +99,7 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File 'C:\work\ALEXZ_Sil
 
 Launcher предпочитает `runtime/ucrt64`, запускает Python с `-I -X utf8`, задаёт локальные пути GTK и ограничивает GUI PATH каталогом runtime и системными каталогами Windows. Путь MSYS2 с компьютера сборки не нужен. Кэш gdk-pixbuf генерируется заново для фактического пути запуска; fontconfig использует конфигурацию из пакета и системные шрифты Windows. Дочерние native/ResolvePython-процессы не наследуют GTK/fontconfig/gdk-pixbuf overrides.
 
-Перед компиляцией Setup.exe выполняется реальная проверка скопированного runtime: Python prefix/import paths, загрузка GTK/Pango, наличие шрифтов, PNG-декодирование и создание/удаление GTK Window без показа. Та же проверка выполняется установщиком на целевой машине до замены прежнего Cadence. Это не заменяет полноценную приёмку в Resolve.
+Перед подготовкой комплекта выполняется реальная проверка runtime: Python prefix/import paths, загрузка GTK/Pango, наличие шрифтов, PNG-декодирование и создание/удаление GTK Window без показа. Та же проверка выполняется установщиком на целевой машине до замены прежнего Cadence. Это не заменяет полноценную приёмку в Resolve.
 
 ## Если предыдущая упаковка прервана
 
@@ -85,7 +107,7 @@ Launcher предпочитает `runtime/ucrt64`, запускает Python с
 
 ## Приёмка на второй машине
 
-1. На машине без MSYS2/Python/Toolkit запустить только Setup.exe; разрешить UAC.
+1. На машине без MSYS2/Python/Toolkit скопировать всю папку с files, запустить Setup.exe; разрешить UAC.
 2. Открыть Resolve Studio21.1+, меню Cadence. Проверить шрифты/русский текст/диалоги/пресеты.
 3. Короткий клип: Raw Source и с обработками, In/Out, CUDA, результат в том же таймлайне.
 4. Проверить OFX на Color. Затем повторить установку и убедиться, что backup создан вне Plugins.

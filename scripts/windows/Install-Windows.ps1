@@ -145,7 +145,18 @@ try {
         if ($menuExisted) { $previousMenu = [IO.File]::ReadAllBytes($menuPath) }
         New-Item -ItemType Directory -Path $root -Force | Out-Null
         try {
-            Copy-Item -LiteralPath $sourceApp -Destination $incoming -Recurse
+            # Не переносим осиротевшие .runtime-* и backup-каталоги из stage.
+            New-Item -ItemType Directory -Path $incoming | Out-Null
+            foreach ($directory in @('bin', 'scripts', 'presets', 'runtime')) {
+                $sourceDirectory = Join-Path $sourceApp $directory
+                if (Test-Path -LiteralPath $sourceDirectory) {
+                    Copy-Item -LiteralPath $sourceDirectory -Destination (Join-Path $incoming $directory) -Recurse
+                }
+            }
+            foreach ($file in @('Start-Cadence.ps1', 'Start-Cadence.cmd', 'Install-Cadence-Menu.ps1', 'cadence_runtime.json', 'WINDOWS_CADENCE_APP.md')) {
+                $sourceFile = Join-Path $sourceApp $file
+                if (Test-Path -LiteralPath $sourceFile) { Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $incoming $file) }
+            }
             if (Test-Path -LiteralPath (Join-Path $incoming 'runtime/ucrt64/bin/python.exe')) {
                 & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $incoming 'Start-Cadence.ps1') -CheckRuntime
                 if ($LASTEXITCODE -ne 0) { throw 'The bundled GTK/Python runtime failed its target-machine check. Previous Cadence was kept.' }

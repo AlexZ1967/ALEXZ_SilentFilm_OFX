@@ -2,6 +2,9 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-20 — Standalone default изменён на папку Setup.exe + files:** без компрессии payload, с incremental sync, runtime/Setup cache; один сжатый EXE только через -SingleExe.
+- [ ] Пользовательская Windows-проверка нового folder Setup: создание, повторный cache hit, обновление app-файлов без повторного сжатия, установка на target с соседним files. Новые cache tests ещё не запускались.
+
 - [x] ✅ **2026-11-20 — пользователь подтвердил компактный runtime:**3688files/106.7MiB/137PE,5PE tests OK и relocated Gtk/Pango/fonts/PNG smoke OK. Inno дошёл до77.34%; финал ещё ожидается.
 - [x] ✅ **2026-11-20 — подготовлен fix GLibWin32-2.0.typelib и regression**, после предупреждения в smoke. Повторная упаковка/отсутствие предупреждения пока не подтверждены.
 

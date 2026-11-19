@@ -4,7 +4,8 @@ param(
     [string]$MsysRoot = 'C:\msys64',
     [string]$VcRedistPath = '',
     [string]$InnoCompiler = '',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [switch]$SingleExe
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -19,6 +20,9 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 if ($OutputDirectory -eq $StageDirectory -or $OutputDirectory.StartsWith($StageDirectory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
     throw 'The installer output directory must be outside the staged payload.'
 }
+$setupRecipePath = ''
+$setupRecipe = ''
+$packagingMarker = ''
 
 # Inno Setup нужен только на машине, создающей установщик.
 if (!$InnoCompiler) {
@@ -59,14 +63,15 @@ if ($LASTEXITCODE -ne 0) { throw 'PE dependency selection tests failed.' }
 try {
     New-Item -ItemType Directory -Path (Join-Path $incoming 'ucrt64') -Force | Out-Null
     # Отбираем только runtime и замыкание DLL, а не всё установленное UCRT64.
-    & (Join-Path $sourcePrefix 'bin/python.exe') -I -X utf8 (Join-Path $PSScriptRoot 'bundle_runtime.py') --prefix $sourcePrefix --destination (Join-Path $incoming 'ucrt64')
-    if ($LASTEXITCODE -ne 0) { throw 'Selecting Python/GTK runtime dependencies failed.' }
-    $packages = & (Join-Path $MsysRoot 'usr/bin/pacman.exe') -Q
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot record the installed MSYS2 package versions.' }
-    [IO.File]::WriteAllLines((Join-Path $incoming 'MSYS2-PACKAGES.txt'), [string[]]$packages, (New-Object Text.UTF8Encoding($false)))
-    if (Test-Path -LiteralPath $runtime) { Move-Item -LiteralPath $runtime -Destination $previous; $saved = $true }
-    Move-Item -LiteralPath $incoming -Destination $runtime
-    $published = $true
+    & (Join-Path $sourcePrefix 'bin/python.exe') -I -X utf8 (Join-Path $PSScriptRoot 'bundle_runtime.py') --prefix $sourcePrefix --destination (Join-Path $incoming 'ucrt64') --cached-runtime (Join-Path $runtime 'ucrt64')
+    if ($LASTEXITCODE -eq 0) {
+        $packages = & (Join-Path $MsysRoot 'usr/bin/pacman.exe') -Q
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot record the installed MSYS2 package versions.' }
+        [IO.File]::WriteAllLines((Join-Path $incoming 'MSYS2-PACKAGES.txt'), [string[]]$packages, (New-Object Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $runtime) { Move-Item -LiteralPath $runtime -Destination $previous; $saved = $true }
+        Move-Item -LiteralPath $incoming -Destination $runtime
+        $published = $true
+    } elseif ($LASTEXITCODE -ne 10) { throw 'Selecting Python/GTK runtime dependencies failed.' }
 
     # Обновляем Python/bootstrap и launcher даже при упаковке старого stage.
     Copy-Item -Path (Join-Path $repo 'scripts/cadence_*.py') -Destination (Join-Path $app 'scripts') -Force
@@ -90,7 +95,14 @@ foreach ($file in @('Install-Windows.ps1', 'Install-Windows.cmd')) {
 }
 $prerequisites = Join-Path $StageDirectory 'prerequisites'
 New-Item -ItemType Directory -Path $prerequisites -Force | Out-Null
-Copy-Item -LiteralPath $VcRedistPath -Destination (Join-Path $prerequisites 'vc_redist.x64.exe') -Force
+$stagedRedist = Join-Path $prerequisites 'vc_redist.x64.exe'
+$copyRedist = $true
+if (Test-Path -LiteralPath $stagedRedist) {
+    $sourceInfo = Get-Item -LiteralPath $VcRedistPath
+    $stagedInfo = Get-Item -LiteralPath $stagedRedist
+    $copyRedist = $sourceInfo.Length -ne $stagedInfo.Length -or $sourceInfo.LastWriteTimeUtc -ne $stagedInfo.LastWriteTimeUtc
+}
+if ($copyRedist) { Copy-Item -LiteralPath $VcRedistPath -Destination $stagedRedist -Force }
 Copy-Item -LiteralPath (Join-Path $repo 'docs/WINDOWS_STANDALONE.md') -Destination $StageDirectory -Force
 $project = Get-Content -LiteralPath (Join-Path $repo 'CMakeLists.txt') -Raw
 $version = [regex]::Match($project, 'project\([^\r\n]+VERSION\s+([0-9.]+)').Groups[1].Value
@@ -107,7 +119,61 @@ if ($architectures) { $setupName += '-sm' + $architectures.Replace(';', '-') }
 $metadata = @{ version = $version; variant = $variant; cuda_architectures = $architectures;
     runtime = 'bundled-ucrt64'; created_utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json
 [IO.File]::WriteAllText((Join-Path $StageDirectory 'package-info.json'), $metadata, (New-Object Text.UTF8Encoding($false)))
-& $InnoCompiler /Qp "/DPayloadRoot=$StageDirectory" "/DOutputRoot=$OutputDirectory" "/DSetupName=$setupName" "/DPackageVersion=$version" (Join-Path $PSScriptRoot 'Standalone.iss')
-if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
-Write-Host "Standalone installer: $OutputDirectory\$setupName.exe"
+if ($SingleExe) {
+    $innoArguments = @('/Qp', "/DPayloadRoot=$StageDirectory", "/DOutputRoot=$OutputDirectory", "/DSetupName=$setupName", "/DPackageVersion=$version")
+    $installer = Join-Path $OutputDirectory "$setupName.exe"
+} else {
+    $distribution = Join-Path $OutputDirectory ($setupName + '-folder')
+    $payload = Join-Path $distribution 'files'
+    New-Item -ItemType Directory -Path $payload -Force | Out-Null
+    $packagingMarker = Join-Path $distribution '.packaging-in-progress'
+    [IO.File]::WriteAllText($packagingMarker, 'Package preparation has not completed.')
+
+    function Sync-PayloadDirectory {
+        param([string]$Source, [string]$Destination)
+        # Только эти генерируемые подкаталоги синхронизируются с удалением устаревших файлов.
+        & robocopy.exe $Source $Destination /E /PURGE /R:1 /W:1 /XJ /NP /NFL /NDL /NJH /NJS /XD __pycache__ /XF '*.pyc'
+        if ($LASTEXITCODE -ge 8) { throw "Payload sync failed: $Source (robocopy exit $LASTEXITCODE)" }
+    }
+
+    function Copy-PayloadFile {
+        param([string]$Source, [string]$Destination)
+        if (Test-Path -LiteralPath $Destination) {
+            $from = Get-Item -LiteralPath $Source
+            $to = Get-Item -LiteralPath $Destination
+            if ($from.Length -eq $to.Length -and $from.LastWriteTimeUtc -eq $to.LastWriteTimeUtc) { return }
+        }
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    }
+
+    Sync-PayloadDirectory (Join-Path $StageDirectory 'ALEXZSilentFilm.ofx.bundle') (Join-Path $payload 'ALEXZSilentFilm.ofx.bundle')
+    $payloadApp = Join-Path $payload 'SilentFilmCadence'
+    New-Item -ItemType Directory -Path $payloadApp -Force | Out-Null
+    foreach ($directory in @('bin', 'scripts', 'presets', 'runtime')) {
+        Sync-PayloadDirectory (Join-Path $app $directory) (Join-Path $payloadApp $directory)
+    }
+    foreach ($file in @('Start-Cadence.ps1', 'Start-Cadence.cmd', 'Install-Cadence-Menu.ps1', 'cadence_runtime.json')) {
+        Copy-PayloadFile (Join-Path $app $file) (Join-Path $payloadApp $file)
+    }
+    Sync-PayloadDirectory $prerequisites (Join-Path $payload 'prerequisites')
+    foreach ($file in @('Install-Windows.ps1', 'Install-Windows.cmd', 'package-info.json', 'WINDOWS_STANDALONE.md')) {
+        Copy-PayloadFile (Join-Path $StageDirectory $file) (Join-Path $payload $file)
+    }
+    $innoArguments = @('/Qp', '/DExternalPayload=1', "/DPayloadRoot=$payload", "/DOutputRoot=$distribution", '/DSetupName=Setup', "/DPackageVersion=$version")
+    $installer = Join-Path $distribution 'Setup.exe'
+    $setupRecipePath = Join-Path $distribution 'setup-recipe.json'
+    $setupRecipe = [ordered]@{ version = $version; script = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'Standalone.iss') -Algorithm SHA256).Hash;
+        compiler = (Get-Item -LiteralPath $InnoCompiler).VersionInfo.FileVersion } | ConvertTo-Json -Compress
+}
+$reuseSetup = !$SingleExe -and (Test-Path -LiteralPath $installer) -and (Test-Path -LiteralPath $setupRecipePath)
+if ($reuseSetup) { $reuseSetup = (Get-Content -LiteralPath $setupRecipePath -Raw).Trim() -eq $setupRecipe }
+if ($reuseSetup) { Write-Host 'Setup.exe unchanged; only external payload files were refreshed.' }
+else {
+    & $InnoCompiler @innoArguments (Join-Path $PSScriptRoot 'Standalone.iss')
+    if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
+    if ($setupRecipePath) { [IO.File]::WriteAllText($setupRecipePath, $setupRecipe, (New-Object Text.UTF8Encoding($false))) }
+}
+if ($packagingMarker) { Remove-Item -LiteralPath $packagingMarker -Force }
+Write-Host "Standalone installer: $installer"
+if (!$SingleExe) { Write-Host "Transfer the entire folder: $distribution (Setup.exe + files). Payload is not compressed." }
 Write-Host 'Test this installer on the target Windows machine without MSYS2. No target-machine test has been run here.'
