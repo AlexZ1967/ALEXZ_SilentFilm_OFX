@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
-    [string]$AppDirectory = $PSScriptRoot,
+    [string]$AppDirectory = '',
     [string]$MsysRoot = 'C:\msys64',
     [string]$ResolvePython = "$env:ProgramFiles\Blackmagic Design\DaVinci Resolve\ResolvePython\ResolvePython.exe"
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$AppDirectory = (Resolve-Path $AppDirectory).Path
+# Папку определяем после param: это работает и при powershell.exe -File.
+if ([string]::IsNullOrWhiteSpace($AppDirectory)) { $AppDirectory = $PSScriptRoot }
+$AppDirectory = (Resolve-Path -LiteralPath $AppDirectory).Path
 if (!(Test-Path (Join-Path $AppDirectory 'bin/silentfilm_cadence.exe'))) { throw 'Choose a complete staged Cadence app directory.' }
 $configuration = @{ app = $AppDirectory; msys = $MsysRoot; resolve_python = $ResolvePython } | ConvertTo-Json -Compress
 $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($configuration))

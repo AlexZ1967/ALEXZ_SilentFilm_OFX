@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$AppDirectory = $PSScriptRoot,
+    [string]$AppDirectory = '',
     [string]$MsysRoot = $(if ($env:SILENTFILM_MSYS_ROOT) { $env:SILENTFILM_MSYS_ROOT } else { 'C:\msys64' }),
     [string]$ResolvePython = $(if ($env:SILENTFILM_RESOLVE_PYTHON) { $env:SILENTFILM_RESOLVE_PYTHON } else { "$env:ProgramFiles\Blackmagic Design\DaVinci Resolve\ResolvePython\ResolvePython.exe" }),
     [ValidateSet('auto', 'cpu', 'cuda')][string]$Backend = 'auto'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$AppDirectory = (Resolve-Path $AppDirectory).Path
+# При -File Windows PowerShell может не заполнить PSScriptRoot в param defaults.
+if ([string]::IsNullOrWhiteSpace($AppDirectory)) { $AppDirectory = $PSScriptRoot }
+$AppDirectory = (Resolve-Path -LiteralPath $AppDirectory).Path
 $gtkBin = Join-Path $MsysRoot 'ucrt64/bin'
 $python = Join-Path $gtkBin 'python.exe'
 $helper = Join-Path $AppDirectory 'bin/silentfilm_cadence.exe'
