@@ -15,7 +15,7 @@ class ColorPreset(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.template = color.template_path()
         self.document = self.template.read_text(encoding="utf-8")
         self.original = bytes.fromhex(color.body_text(self.document))

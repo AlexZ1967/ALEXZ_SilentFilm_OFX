@@ -19,7 +19,7 @@ class CrankExposureImport(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.path = Path(self.temporary.name) / "exposure.sfexposure"
+        self.path = Path(self.temporary.name).resolve() / "exposure.sfexposure"
         self.path.write_text("SILENTFILM_CRANK_EXPOSURE 1\nofx 25 1\n0 1.2\n", encoding="utf-8")
         self.item = Mock()
         self.item.GetUniqueId.return_value = "result-item"
@@ -157,7 +157,7 @@ class ImportIsolation(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+        self.directory = Path(self.temporary.name).resolve()
         self.context = {"project_id": "project-A", "project_name": "Original", "source_name": "source"}
         (self.directory / "app_context.json").write_text(json.dumps(self.context), encoding="utf-8")
         (self.directory / "cadence.mov").touch()
@@ -308,7 +308,7 @@ class TimelineSelection(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+        self.directory = Path(self.temporary.name).resolve()
         self.media_path = self.directory / "source.mov"
         self.media_path.touch()
         self.media = Mock()
@@ -949,7 +949,7 @@ class SavedJobUiState(unittest.TestCase):
             setattr(app, name, Mock())
         app.values = {}
         with tempfile.TemporaryDirectory() as folder:
-            directory = Path(folder)
+            directory = Path(folder).resolve()
             (directory / "app_context.json").write_text(json.dumps({"target": {"item_id": "saved"}, "source_name": "clip"}), encoding="utf-8")
             app.open_job()
             callback = app.choose_path.call_args.args[2]
@@ -1075,7 +1075,7 @@ class BatchProcessing(unittest.TestCase):
         from cadence_batch import BatchQueue
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+        self.directory = Path(self.temporary.name).resolve()
         self.items = [{"project_id": "P", "target": {"item_id": key, "source_start": start},
                        "source": {"name": key}} for key, start in (("A", 12), ("B", 90), ("C", 150))]
         self.queue = BatchQueue(self.items, {"seed": 17}, self.directory)

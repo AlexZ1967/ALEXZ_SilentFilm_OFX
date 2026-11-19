@@ -68,7 +68,7 @@ class Binding(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.path = Path(self.temporary.name) / 'Кино "A"' / "exposure.sfexposure"
+        self.path = Path(self.temporary.name).resolve() / 'Кино "A"' / "exposure.sfexposure"
         self.source = Tool("MediaIn", "MediaIn1")
         self.sink = Tool("MediaOut", "MediaOut1")
         self.tool = Tool("runtime.registry.id", "SilentFilmCrankExposure1",

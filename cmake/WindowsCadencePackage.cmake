@@ -1,3 +1,18 @@
+if(BUILD_TESTING)
+    execute_process(COMMAND "${SILENTFILM_TEST_FFMPEG}" -hide_banner -devices
+        RESULT_VARIABLE silentfilm_ffmpeg_devices_status
+        OUTPUT_VARIABLE silentfilm_ffmpeg_devices
+        ERROR_VARIABLE silentfilm_ffmpeg_devices_error
+        TIMEOUT 20)
+    if(NOT "${silentfilm_ffmpeg_devices_status}" STREQUAL "0"
+        OR NOT "${silentfilm_ffmpeg_devices}" MATCHES "[ \t]lavfi[ \t]")
+        message(FATAL_ERROR
+            "FFmpeg не предоставляет lavfi для интеграционных тестов. "
+            "Повторите scripts/windows/Prepare-Cadence-Dependencies.ps1 -VcpkgRoot <путь-vcpkg>: "
+            "нужен feature avdevice. FFmpeg status: ${silentfilm_ffmpeg_devices_status}. "
+            "${silentfilm_ffmpeg_devices_error}")
+    endif()
+endif()
 file(GLOB silentfilm_media_runtime "${SILENTFILM_WINDOWS_MEDIA_ROOT}/bin/*.dll")
 if(NOT EXISTS "${SILENTFILM_WINDOWS_MEDIA_ROOT}/bin/zstd.dll")
     message(FATAL_ERROR "Нет zstd.dll для Color DRX; установите zstd:x64-silentfilm-media.")
