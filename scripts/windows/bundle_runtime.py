@@ -141,7 +141,8 @@ def collect_typelibs(plan):
     repository = gi.Repository.get_default()
     for namespace, version in (("Gtk", "4.0"), ("PangoCairo", "1.0"), ("GdkPixbuf", "2.0"), ("Gio", "2.0")):
         repository.require(namespace, version)
-    for namespace, version in (("GdkWin32", "4.0"), ("GioWin32", "2.0")):
+    # GLibWin32 загружается GIO отдельно и не входит в обычный closure Gtk.
+    for namespace, version in (("GLibWin32", "2.0"), ("GdkWin32", "4.0"), ("GioWin32", "2.0")):
         if (plan.prefix / "lib/girepository-1.0" / f"{namespace}-{version}.typelib").is_file():
             repository.require(namespace, version)
     for namespace in repository.get_loaded_namespaces():

@@ -4,10 +4,12 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/windows"))
-from bundle_runtime import pe_imports, RuntimePlan
+from bundle_runtime import pe_imports, RuntimePlan, collect_typelibs
 
 
 def image(imports=(), delayed=()):
@@ -97,6 +99,28 @@ class PeDependencies(unittest.TestCase):
         plan = RuntimePlan(self.prefix, self.system)
         plan.tree(stdlib, "stdlib", excluded=("test",))
         self.assertEqual(set(plan.files), {Path("lib/python3.14/json/__init__.py")})
+
+    def test_glib_win32_is_included_without_a_declared_gtk_dependency(self):
+        directory = self.prefix / "lib/girepository-1.0"
+        directory.mkdir(parents=True)
+        (directory / "GLibWin32-2.0.typelib").write_bytes(b"")
+        loaded = {}
+
+        def require(namespace, version):
+            path = directory / f"{namespace}-{version}.typelib"
+            path.touch()
+            loaded[namespace] = str(path)
+
+        repository = Mock()
+        repository.require.side_effect = require
+        repository.get_loaded_namespaces.side_effect = lambda: list(loaded)
+        repository.get_typelib_path.side_effect = lambda namespace: loaded[namespace]
+        gi = SimpleNamespace(Repository=SimpleNamespace(get_default=lambda: repository))
+        plan = RuntimePlan(self.prefix, self.system)
+        with patch.dict(sys.modules, {"gi": gi}):
+            collect_typelibs(plan)
+        repository.require.assert_any_call("GLibWin32", "2.0")
+        self.assertIn(Path("lib/girepository-1.0/GLibWin32-2.0.typelib"), plan.files)
 
 
 if __name__ == "__main__":

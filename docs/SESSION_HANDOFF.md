@@ -1,5 +1,11 @@
 # Состояние проекта для нового диалога
 
+## Компактный runtime: smoke подтверждён, GLibWin32 добавлен — 2026-11-20
+
+✅ **2026-11-20 — пользовательский Package-Standalone log подтвердил:**5PE tests OK за0.201с; runtime3688files/106.7MiB/137PE; relocated Python3.14.10, Gtk4.24, Pango1.58.2, fonts185, Runtime OK. Inno дошёл до77.34% compression; итоговый Setup ещё не подтверждён этим фрагментом.
+
+Обнаружен GIRepository CRITICAL: GLibWin32.typelib отсутствует. Подготовлено включение GLibWin32-2.0 рядом с GioWin32/GdkWin32; его нет в обычном Gtk closure. Добавлен regression на платформенный namespace без объявленной Gtk dependency (итого6PE tests). Новый тест и исправленный smoke агент не запускал. Пользователю предложено дождаться текущего сжатия, затем git pull и повторить только Package-Standalone без C++ rebuild; переносить исправленный Setup. Старыйstage всё ещё75, для4070Ti нужен89/75;89. SDK/Comfy/математика не менялись.
+
 ## Компактный Windows runtime — подготовлен 2026-11-20
 
 Пользователь сообщил, что Standalone75 слишком долго копирует большой набор файлов. Причина — выбранное агентом полное дерево UCRT64 из9686fa0. Пользователю предложено Ctrl+C; весь stage не удалять, только осиротевшие .runtime-GUID после остановки, если есть. Пользователь видит обычный runtime; ему предложено оставить его и показать список stage/SilentFilmCadence (bin/scripts/presets должны сохраняться).

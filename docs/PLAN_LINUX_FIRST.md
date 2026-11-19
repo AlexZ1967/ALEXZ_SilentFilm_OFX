@@ -2,6 +2,9 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-20 — пользователь подтвердил компактный runtime:**3688files/106.7MiB/137PE,5PE tests OK и relocated Gtk/Pango/fonts/PNG smoke OK. Inno дошёл до77.34%; финал ещё ожидается.
+- [x] ✅ **2026-11-20 — подготовлен fix GLibWin32-2.0.typelib и regression**, после предупреждения в smoke. Повторная упаковка/отсутствие предупреждения пока не подтверждены.
+
 - [x] ✅ **2026-11-20 — полный UCRT64 в Standalone заменён selective Python/GTK + PE/typelib DLL closure**, с manifest/размером, PE-тестами и явным payload без временных backup-папок.
 - [ ] Пользователь проверяет компактную упаковку существующего stage (без C++ rebuild), затем runtime/Setup.exe; новые проверки ещё не запускались.
 
