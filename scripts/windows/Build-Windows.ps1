@@ -88,15 +88,19 @@ if ($LASTEXITCODE -ne 0) { throw 'CTest failed; packaging was not started.' }
 & cmake --install $build --config Release --prefix $stage
 if ($LASTEXITCODE -ne 0) { throw 'Staging failed.' }
 $artifact = Join-Path $build "ALEXZSilentFilm-windows-x64-$variant.zip"
-Compress-Archive -Path (Join-Path $stage 'ALEXZSilentFilm.ofx.bundle') -DestinationPath $artifact -Force
+if (!$Standalone) {
+    Compress-Archive -Path (Join-Path $stage 'ALEXZSilentFilm.ofx.bundle') -DestinationPath $artifact -Force
+    Write-Host "Archive: $artifact"
+}
 if ($Cadence) {
-    $cadenceArtifact = Join-Path $build "SilentFilmCadence-windows-x64-$variant.zip"
-    Compress-Archive -Path (Join-Path $stage 'SilentFilmCadence') -DestinationPath $cadenceArtifact -Force
+    if (!$Standalone) {
+        $cadenceArtifact = Join-Path $build "SilentFilmCadence-windows-x64-$variant.zip"
+        Compress-Archive -Path (Join-Path $stage 'SilentFilmCadence') -DestinationPath $cadenceArtifact -Force
+        Write-Host "Cadence archive: $cadenceArtifact"
+    }
     Write-Host "Cadence app: $stage/SilentFilmCadence/Start-Cadence.cmd"
-    Write-Host "Cadence archive: $cadenceArtifact"
 }
 Write-Host "Bundle: $stage/ALEXZSilentFilm.ofx.bundle"
-Write-Host "Archive: $artifact"
 if ($Standalone) {
     & (Join-Path $PSScriptRoot 'Package-Standalone.ps1') -StageDirectory $stage -MsysRoot $MsysRoot -VcRedistPath $VcRedistPath -InnoCompiler $InnoCompiler
 }

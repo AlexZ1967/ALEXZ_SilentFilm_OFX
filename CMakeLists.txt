@@ -300,6 +300,9 @@ if(BUILD_TESTING)
             find_program(SILENTFILM_TEST_PYTHON python3 PATHS /usr/bin NO_DEFAULT_PATH)
         endif()
         if(SILENTFILM_TEST_PYTHON)
+            add_test(NAME silentfilm_windows_runtime_bundle COMMAND "${SILENTFILM_TEST_PYTHON}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_runtime_bundle_tests.py")
+            set_tests_properties(silentfilm_windows_runtime_bundle PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
             add_test(NAME silentfilm_cadence_platform COMMAND "${SILENTFILM_TEST_PYTHON}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/cadence_platform_tests.py")
             set_tests_properties(silentfilm_cadence_platform PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")

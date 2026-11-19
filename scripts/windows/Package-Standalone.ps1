@@ -54,12 +54,13 @@ $incoming = Join-Path $app ('.runtime-' + [guid]::NewGuid().ToString('N'))
 $previous = Join-Path $app ('.previous-runtime-' + [guid]::NewGuid().ToString('N'))
 $saved = $false
 $published = $false
+& (Join-Path $sourcePrefix 'bin/python.exe') -I -X utf8 (Join-Path $repo 'tests/windows_runtime_bundle_tests.py')
+if ($LASTEXITCODE -ne 0) { throw 'PE dependency selection tests failed.' }
 try {
     New-Item -ItemType Directory -Path (Join-Path $incoming 'ucrt64') -Force | Out-Null
-    # Полный UCRT64 prefix сохраняет DLL, typelibs, Python stdlib, темы и лицензии.
-    # Системный MSYS2 не изменяется; pacman/bash и дерево usr не копируются.
-    & robocopy.exe $sourcePrefix (Join-Path $incoming 'ucrt64') /E /XJ /R:1 /W:1 /NP /NFL /NDL /NJH /NJS /XD __pycache__ /XF '*.pyc'
-    if ($LASTEXITCODE -ge 8) { throw "Runtime copy failed: robocopy exit $LASTEXITCODE" }
+    # Отбираем только runtime и замыкание DLL, а не всё установленное UCRT64.
+    & (Join-Path $sourcePrefix 'bin/python.exe') -I -X utf8 (Join-Path $PSScriptRoot 'bundle_runtime.py') --prefix $sourcePrefix --destination (Join-Path $incoming 'ucrt64')
+    if ($LASTEXITCODE -ne 0) { throw 'Selecting Python/GTK runtime dependencies failed.' }
     $packages = & (Join-Path $MsysRoot 'usr/bin/pacman.exe') -Q
     if ($LASTEXITCODE -ne 0) { throw 'Cannot record the installed MSYS2 package versions.' }
     [IO.File]::WriteAllLines((Join-Path $incoming 'MSYS2-PACKAGES.txt'), [string[]]$packages, (New-Object Text.UTF8Encoding($false)))
@@ -106,7 +107,7 @@ if ($architectures) { $setupName += '-sm' + $architectures.Replace(';', '-') }
 $metadata = @{ version = $version; variant = $variant; cuda_architectures = $architectures;
     runtime = 'bundled-ucrt64'; created_utc = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json
 [IO.File]::WriteAllText((Join-Path $StageDirectory 'package-info.json'), $metadata, (New-Object Text.UTF8Encoding($false)))
-& $InnoCompiler "/DPayloadRoot=$StageDirectory" "/DOutputRoot=$OutputDirectory" "/DSetupName=$setupName" "/DPackageVersion=$version" (Join-Path $PSScriptRoot 'Standalone.iss')
+& $InnoCompiler /Qp "/DPayloadRoot=$StageDirectory" "/DOutputRoot=$OutputDirectory" "/DSetupName=$setupName" "/DPackageVersion=$version" (Join-Path $PSScriptRoot 'Standalone.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
 Write-Host "Standalone installer: $OutputDirectory\$setupName.exe"
 Write-Host 'Test this installer on the target Windows machine without MSYS2. No target-machine test has been run here.'

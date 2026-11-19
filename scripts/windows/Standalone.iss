@@ -22,7 +22,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Files]
-Source: "{#PayloadRoot}\*"; DestDir: "{tmp}\SilentFilmPayload"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#PayloadRoot}\ALEXZSilentFilm.ofx.bundle\*"; DestDir: "{tmp}\SilentFilmPayload\ALEXZSilentFilm.ofx.bundle"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\bin\*"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence\bin"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\scripts\cadence_*.py"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence\scripts"; Flags: ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\presets\*.drx"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence\presets"; Flags: ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\runtime\*"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence\runtime"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\*.ps1"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence"; Flags: ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\*.cmd"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence"; Flags: ignoreversion
+Source: "{#PayloadRoot}\SilentFilmCadence\cadence_runtime.json"; DestDir: "{tmp}\SilentFilmPayload\SilentFilmCadence"; Flags: ignoreversion
+Source: "{#PayloadRoot}\Install-Windows.*"; DestDir: "{tmp}\SilentFilmPayload"; Flags: ignoreversion
+Source: "{#PayloadRoot}\package-info.json"; DestDir: "{tmp}\SilentFilmPayload"; Flags: ignoreversion
+Source: "{#PayloadRoot}\prerequisites\vc_redist.x64.exe"; DestDir: "{tmp}\SilentFilmPayload\prerequisites"; Flags: ignoreversion
 
 [Code]
 procedure CurStepChanged(CurStep: TSetupStep);

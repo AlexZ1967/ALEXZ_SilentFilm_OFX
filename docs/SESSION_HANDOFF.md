@@ -1,5 +1,15 @@
 # Состояние проекта для нового диалога
 
+## Компактный Windows runtime — подготовлен 2026-11-20
+
+Пользователь сообщил, что Standalone75 слишком долго копирует большой набор файлов. Причина — выбранное агентом полное дерево UCRT64 из9686fa0. Пользователю предложено Ctrl+C; весь stage не удалять, только осиротевшие .runtime-GUID после остановки, если есть. Пользователь видит обычный runtime; ему предложено оставить его и показать список stage/SilentFilmCadence (bin/scripts/presets должны сохраняться).
+
+✅ **2026-11-20 — подготовлен bundle_runtime.py:** Python stdlib без test/Tk/pip/dev, только gi/cairo site-packages, GIRepository closure typelibs и DLL-имена из них, PE normal/delay import closure; PNG/SVG/JPEG loader modules и GUI resources. Нет полного prefix, SDK/компиляторов/include/staticlibs/посторонних Python-пакетов. Есть summary file count/MiB и runtime-files.json с причинами включения. Inno payload перечислен явно, временные runtime/backup папки не включаются; /Qp без списка всех сжимаемых файлов. Package-Standalone запускает новые PE selection tests перед сбором; тот же тест добавлен в CTest. Изолированная relocated Gtk/Pango/fonts/PNG проверка сохранена.
+
+Build -Standalone теперь пропускает промежуточные ZIP: это также исключает повторное сжатие прежнего большого runtime до его замены. Создаётся только Setup.exe; обычная ветка безStandalone сохраняет ZIP. Для существующего stage доступен прямой Package-Standalone без C++ rebuild.
+
+**Новые тесты, отбор и Setup.exe ещё не запускались агентом.** Следующий шаг — git pull и только Package-Standalone для уже собранного75stage; прислать Selected runtime summary и CheckRuntime/ISCC result. Для второй машины RTX4070Ti/12GiB, Win10Pro19045x64, driver621.24 уточнён sm89; один пакет75;89 собирается на RTX2070. Пока текущий запущенный пользователем build был75, работу4070Ti не объявлять проверенной. SDK/Comfy/математика не менялись.
+
 ## Автономный Windows Setup.exe — подготовлен 2026-11-19
 
 ✅ **2026-11-19 — реализован pipeline -Cadence -Standalone:** Package-Standalone.ps1 копирует полный UCRT64 prefix в app/runtime (DLL/Python/typelibs/resources/licenses, без изменения MSYS2), фиксирует версии pacman, обновляет scripts/launcher, запускает реальную relocated runtime проверку и компилирует Standalone.iss через Inno Setup6.3+/7. Подписанный VC x64 redist берётся из VS или -VcRedistPath, включается в prerequisites, ставится повышенным OFX-процессом. Setup.exe вызывает общий installer для исходного пользователя; target MSYS2/Python/Toolkit не нужны. Resolve21.1+/NVIDIA driver остаются внешними требованиями. Инструкция WINDOWS_STANDALONE.md.
