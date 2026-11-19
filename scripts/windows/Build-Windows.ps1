@@ -10,11 +10,15 @@ param(
     [ValidatePattern('^[0-9]+(;[0-9]+)*$')][string]$CudaArchitectures = '86',
     [ValidateRange(1, 64)][int]$Jobs = 2,
     [switch]$Install,
-    [switch]$SkipInstallPrompt
+    [switch]$SkipInstallPrompt,
+    [switch]$Standalone,
+    [string]$VcRedistPath = '',
+    [string]$InnoCompiler = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($Install -and $SkipInstallPrompt) { throw 'Choose either -Install or -SkipInstallPrompt.' }
+if ($Standalone -and !$Cadence) { throw '-Standalone requires -Cadence.' }
 if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows x64.' }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $OfxIncludeDir = (Resolve-Path $OfxIncludeDir).Path
@@ -93,6 +97,9 @@ if ($Cadence) {
 }
 Write-Host "Bundle: $stage/ALEXZSilentFilm.ofx.bundle"
 Write-Host "Archive: $artifact"
+if ($Standalone) {
+    & (Join-Path $PSScriptRoot 'Package-Standalone.ps1') -StageDirectory $stage -MsysRoot $MsysRoot -VcRedistPath $VcRedistPath -InnoCompiler $InnoCompiler
+}
 Write-Host 'Build and packaging complete. Check CTest output for skipped CUDA tests.'
 $installNow = $Install.IsPresent
 if (!$Install -and !$SkipInstallPrompt -and !$env:CI -and !$env:TF_BUILD -and

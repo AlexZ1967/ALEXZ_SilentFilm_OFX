@@ -2,10 +2,31 @@
 param(
     [string]$StageDirectory = '',
     [string]$MsysRoot = 'C:\msys64',
-    [switch]$OfxOnly
+    [switch]$OfxOnly,
+    [string]$LogFile = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$transcript = $false
+if ($LogFile) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $LogFile) -Force | Out-Null
+    Start-Transcript -Path $LogFile -Append | Out-Null
+    $transcript = $true
+}
+
+function Install-Prerequisites {
+    param([string]$Stage)
+    $redist = Join-Path $Stage 'prerequisites/vc_redist.x64.exe'
+    if (Test-Path -LiteralPath $redist) {
+        $signature = Get-AuthenticodeSignature -LiteralPath $redist
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+            throw 'Invalid Microsoft signature on the bundled Visual C++ Redistributable.'
+        }
+        $process = Start-Process -FilePath $redist -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+        if ($process.ExitCode -notin @(0, 1638, 3010)) { throw "Visual C++ runtime installation failed: $($process.ExitCode)" }
+        if ($process.ExitCode -eq 3010) { Write-Host 'Visual C++ runtime installed; Windows requests a reboot.' }
+    }
+}
 
 function Assert-ResolveClosed {
     if (Get-Process -Name Resolve -ErrorAction SilentlyContinue) {
@@ -45,20 +66,24 @@ function Install-OfxBundle {
 
 try {
     if ([string]::IsNullOrWhiteSpace($StageDirectory)) {
-        $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
-        $candidates = @(Get-ChildItem -LiteralPath $repo -Directory -Filter 'build-windows-*' |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'stage/ALEXZSilentFilm.ofx.bundle/Contents/Win64/ALEXZSilentFilm.ofx') } |
-            Sort-Object LastWriteTime -Descending)
-        if ($candidates.Count -eq 0) { throw 'No staged Windows build found. Build and pass CTest first, or specify -StageDirectory.' }
-        for ($index = 0; $index -lt $candidates.Count; ++$index) {
-            Write-Host ('{0}: {1}' -f ($index + 1), $candidates[$index].Name)
+        if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ALEXZSilentFilm.ofx.bundle')) {
+            $StageDirectory = $PSScriptRoot
+        } else {
+            $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
+            $candidates = @(Get-ChildItem -LiteralPath $repo -Directory -Filter 'build-windows-*' |
+                Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'stage/ALEXZSilentFilm.ofx.bundle/Contents/Win64/ALEXZSilentFilm.ofx') } |
+                Sort-Object LastWriteTime -Descending)
+            if ($candidates.Count -eq 0) { throw 'No staged Windows build found. Build and pass CTest first, or specify -StageDirectory.' }
+            for ($index = 0; $index -lt $candidates.Count; ++$index) {
+                Write-Host ('{0}: {1}' -f ($index + 1), $candidates[$index].Name)
+            }
+            $selection = Read-Host 'Choose the build number to install'
+            $number = 0
+            if (![int]::TryParse($selection, [ref]$number) -or $number -lt 1 -or $number -gt $candidates.Count) {
+                throw 'Invalid build number. Nothing was installed.'
+            }
+            $StageDirectory = Join-Path $candidates[$number - 1].FullName 'stage'
         }
-        $selection = Read-Host 'Choose the build number to install'
-        $number = 0
-        if (![int]::TryParse($selection, [ref]$number) -or $number -lt 1 -or $number -gt $candidates.Count) {
-            throw 'Invalid build number. Nothing was installed.'
-        }
-        $StageDirectory = Join-Path $candidates[$number - 1].FullName 'stage'
     }
     $StageDirectory = (Resolve-Path -LiteralPath $StageDirectory).Path
     $sourceBundle = Join-Path $StageDirectory 'ALEXZSilentFilm.ofx.bundle'
@@ -71,6 +96,7 @@ try {
     $administrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if ($OfxOnly) {
         if (!$administrator) { throw 'The OFX copy requires administrator rights.' }
+        Install-Prerequisites $StageDirectory
         Install-OfxBundle $sourceBundle
         exit 0
     }
@@ -94,7 +120,7 @@ try {
         Write-Host "Cadence default backend: $($configuration.backend)"
     }
 
-    if ($administrator) { Install-OfxBundle $sourceBundle }
+    if ($administrator) { Install-Prerequisites $StageDirectory; Install-OfxBundle $sourceBundle }
     else {
         # Повышается только копирование OFX; аргументы путей заключены в кавычки.
         $arguments = @('-NoProfile', '-ExecutionPolicy', 'RemoteSigned', '-File',
@@ -120,6 +146,10 @@ try {
         New-Item -ItemType Directory -Path $root -Force | Out-Null
         try {
             Copy-Item -LiteralPath $sourceApp -Destination $incoming -Recurse
+            if (Test-Path -LiteralPath (Join-Path $incoming 'runtime/ucrt64/bin/python.exe')) {
+                & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy RemoteSigned -File (Join-Path $incoming 'Start-Cadence.ps1') -CheckRuntime
+                if ($LASTEXITCODE -ne 0) { throw 'The bundled GTK/Python runtime failed its target-machine check. Previous Cadence was kept.' }
+            }
             if (Test-Path -LiteralPath $destination) {
                 New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force | Out-Null
                 Move-Item -LiteralPath $destination -Destination $backup
@@ -146,4 +176,6 @@ try {
 } catch {
     Write-Error -ErrorAction Continue $_
     exit 1
+} finally {
+    if ($transcript) { Stop-Transcript | Out-Null }
 }

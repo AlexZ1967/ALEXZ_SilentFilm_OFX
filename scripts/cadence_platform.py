@@ -29,7 +29,9 @@ def child_environment():
         environment.pop(name, None)
     if WINDOWS:
         for name in ("PYGI_DLL_PATH", "GI_TYPELIB_PATH", "GTK_PATH", "GTK_DATA_PREFIX",
-                     "GSETTINGS_SCHEMA_DIR", "XDG_DATA_DIRS", "GDK_BACKEND", "GSK_RENDERER"):
+                     "GTK_EXE_PREFIX", "GSETTINGS_SCHEMA_DIR", "XDG_DATA_DIRS", "GDK_BACKEND", "GSK_RENDERER",
+                     "GDK_PIXBUF_MODULEDIR", "GDK_PIXBUF_MODULE_FILE", "FONTCONFIG_FILE", "FONTCONFIG_PATH",
+                     "GIO_MODULE_DIR", "GIO_EXTRA_MODULES"):
             environment.pop(name, None)
         native_path = environment.get("SILENTFILM_NATIVE_PATH")
         if native_path is not None:

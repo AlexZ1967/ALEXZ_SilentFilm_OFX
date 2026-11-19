@@ -1,5 +1,19 @@
 # Состояние проекта для нового диалога
 
+## Автономный Windows Setup.exe — подготовлен 2026-11-19
+
+✅ **2026-11-19 — реализован pipeline -Cadence -Standalone:** Package-Standalone.ps1 копирует полный UCRT64 prefix в app/runtime (DLL/Python/typelibs/resources/licenses, без изменения MSYS2), фиксирует версии pacman, обновляет scripts/launcher, запускает реальную relocated runtime проверку и компилирует Standalone.iss через Inno Setup6.3+/7. Подписанный VC x64 redist берётся из VS или -VcRedistPath, включается в prerequisites, ставится повышенным OFX-процессом. Setup.exe вызывает общий installer для исходного пользователя; target MSYS2/Python/Toolkit не нужны. Resolve21.1+/NVIDIA driver остаются внешними требованиями. Инструкция WINDOWS_STANDALONE.md.
+
+Launcher предпочитает bundled runtime, изолированный Python -I -X utf8 и GUI PATH без MSYS2; bootstrap пересоздаёт gdk-pixbuf cache для актуального пути, задаёт локальный fontconfig, затем запускает GUI. CheckRuntime проверяет prefix/import paths, Gtk/Pango/fonts/PNG/Window; вызывается при упаковке и до замены приложения на target. Gtk/gdk/fontconfig/gio env не утекают в native/ResolvePython; дополнен существующий platform test. Обычный MSYS2-путь сохранён. Математика/ядро/Comfy/SDK не менялись.
+
+**НЕ ПРОВЕРЕНО:** новый Windows bundler, Inno compile, relocated runtime и чистая target Windows. Агент сборки/тесты/установки не запускал. Следующий шаг — пользователь ставит Inno на builder, предоставляет VC redist, выполняет текущую Ninja CUDA build команду с -Standalone, присылает smoke/ISCC log; затем один Setup.exe тестируется на машине без MSYS2. Старые CPU23/23/CUDA31/31 не выдавать за проверку автономного пакета. Полный prefix выбран для первой надёжной упаковки; размер может быть большим и ещё не измерялся.
+
+✅ **2026-11-19 — пользователь дополнительно подтвердил «всё сработало» после установки4055968:** запуск установленного меню и OFX в Resolve по предложенной проверке. Это относится к прежнему обычному пакету.
+
+## Windows installer: установка подтверждена — 2026-11-19
+
+✅ **2026-11-19 — пользователь выполнил Install-Windows.cmd из4055968:** при открытом Resolve установка остановилась до копирования; после закрытия Resolve установка завершилась Installation complete. Backend=cuda; OFX в Common Files/OFX/Plugins, предыдущий bundle сохранён в ProgramData/ALEXZSilentFilm/backups/OFX; Cadence в LocalAppData/Programs/ALEXZSilentFilm/SilentFilmCadence; Utility menu в AppData/Roaming текущего пользователя d.antropov. Это подтверждает фактическую установку и блокировку открытого Resolve. Отдельный UAC-путь из обычного процесса, отказ UAC, откат при ошибке и post-build prompt не подтверждены этим логом (PowerShell показан из Windows/system32). Следующий шаг — запустить Resolve, проверить меню, короткий CUDA-расчёт установленным Cadence и наличие/работу OFX на Color. Агент Windows-команды не выполнял.
+
 ## Единый Windows installer — подготовлен 2026-11-19
 
 ✅ **2026-11-19 — реализованы Install-Windows.cmd/ps1 и предложение установки после успешных build/CTest/stage/ZIP.** OFX копируется отдельно повышенным процессом (UAC), Cadence/Utility menu исходным пользователем в LocalAppData/Programs/ALEXZSilentFilm. CUDA default сохраняется из пакета. Старые папки выносятся в backups вне Plugins; временное копирование до замены и возврат предыдущей папки при ошибке. Открытый Resolve/Cadence не закрываются принудительно: требуется закрыть вручную. Build -Install/-SkipInstallPrompt, CI/redirected input без вопроса. Документация и ручные проверки — WINDOWS_INSTALLER.md. Windows installer ещё не запускался, новые изменения не выдавать за PASS; агент проверки не выполнял. Соседняя Bin Sync/tools работа сохраняется.

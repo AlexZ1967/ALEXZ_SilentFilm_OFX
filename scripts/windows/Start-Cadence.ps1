@@ -3,18 +3,24 @@ param(
     [string]$AppDirectory = '',
     [string]$MsysRoot = $(if ($env:SILENTFILM_MSYS_ROOT) { $env:SILENTFILM_MSYS_ROOT } else { 'C:\msys64' }),
     [string]$ResolvePython = $(if ($env:SILENTFILM_RESOLVE_PYTHON) { $env:SILENTFILM_RESOLVE_PYTHON } else { "$env:ProgramFiles\Blackmagic Design\DaVinci Resolve\ResolvePython\ResolvePython.exe" }),
-    [ValidateSet('auto', 'cpu', 'cuda')][string]$Backend = 'auto'
+    [ValidateSet('auto', 'cpu', 'cuda')][string]$Backend = 'auto',
+    [switch]$CheckRuntime
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 # При -File Windows PowerShell может не заполнить PSScriptRoot в param defaults.
 if ([string]::IsNullOrWhiteSpace($AppDirectory)) { $AppDirectory = $PSScriptRoot }
 $AppDirectory = (Resolve-Path -LiteralPath $AppDirectory).Path
+$bundled = Test-Path -LiteralPath (Join-Path $AppDirectory 'runtime/ucrt64/bin/python.exe')
+if ($bundled) { $MsysRoot = Join-Path $AppDirectory 'runtime' }
+$prefix = Join-Path $MsysRoot 'ucrt64'
 $gtkBin = Join-Path $MsysRoot 'ucrt64/bin'
 $python = Join-Path $gtkBin 'python.exe'
 $helper = Join-Path $AppDirectory 'bin/silentfilm_cadence.exe'
 $script = Join-Path $AppDirectory 'scripts/cadence_app.py'
-foreach ($required in @($python, $helper, $script, $ResolvePython)) {
+$requiredFiles = @($python, $helper, $script)
+if (!$CheckRuntime) { $requiredFiles += $ResolvePython }
+foreach ($required in $requiredFiles) {
     if (!(Test-Path -LiteralPath $required)) { throw "Required file not found: $required" }
 }
 if ($Backend -eq 'auto') {
@@ -37,13 +43,26 @@ $environment = @{
     'PYTHONHOME' = $null
     'PYTHONPATH' = $null
 }
+if ($bundled) {
+    # GTK не ищет отсутствующие DLL в MSYS2, оставшемся на машине сборки.
+    $environment['PATH'] = "$gtkBin;$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+    $environment['GTK_PATH'] = $null
+    $environment['GIO_MODULE_DIR'] = Join-Path $prefix 'lib/gio/modules'
+    $environment['GIO_EXTRA_MODULES'] = $null
+}
 $previous = @{}
 try {
     foreach ($name in $environment.Keys) {
         $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
         [Environment]::SetEnvironmentVariable($name, $environment[$name], 'Process')
     }
-    & $python $script --helper $helper --root $output --backend $Backend --resolve-python $ResolvePython
+    if ($bundled -or $CheckRuntime) {
+        $bootstrap = Join-Path $AppDirectory 'scripts/cadence_windows_runtime.py'
+        if ($CheckRuntime) { & $python -I -X utf8 $bootstrap --prefix $prefix --check }
+        else { & $python -I -X utf8 $bootstrap --prefix $prefix --app-script $script --helper $helper --root $output --backend $Backend --resolve-python $ResolvePython }
+    } else {
+        & $python $script --helper $helper --root $output --backend $Backend --resolve-python $ResolvePython
+    }
     if ($LASTEXITCODE -ne 0) { throw "Cadence GUI exited with code $LASTEXITCODE" }
 } finally {
     foreach ($name in $previous.Keys) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }

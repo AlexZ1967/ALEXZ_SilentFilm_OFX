@@ -2,6 +2,13 @@
 
 ## Актуальная очередь после0.34
 
+- [x] ✅ **2026-11-19 — подготовлен автономный Windows Setup.exe pipeline:** Python/GTK/Pango/UCRT64 внутри app, VC redist, общий installer OFX/menu, relocated smoke check и Build -Standalone. [Пошаговая инструкция](WINDOWS_STANDALONE.md).
+- [ ] Windows: собрать -Standalone с Inno и VC redist, проверить relocated runtime и один Setup.exe на машине без MSYS2; агент это не запускал.
+- [x] ✅ **2026-11-19 — пользователь подтвердил работу установленного обычного Cadence/menu и OFX в Resolve.**
+
+- [x] ✅ **2026-11-19 — пользователь подтвердил Windows installer4055968:** блокировка открытого Resolve; после закрытия OFX установлен с резервной копией, Cadence/menu установлены для d.antropov, backend=cuda.
+- [ ] Проверить запуск установленного меню Cadence и OFX внутри Resolve; UAC из обычного процесса, отказ UAC и post-build prompt ещё не подтверждены.
+
 - [x] ✅ **2026-11-19 — подготовлены единый Windows installer и вопрос установки после успешной сборки/тестов/упаковки**, с UAC только для OFX, пользовательскими Cadence/menu и резервными копиями. [Инструкция](WINDOWS_INSTALLER.md).
 - [ ] Пользовательская проверка Windows installer: закрытый/открытый Resolve, отказ UAC, установка/повторная установка, CUDA GUI и OFX в host; новый installer пока не проверен.
 

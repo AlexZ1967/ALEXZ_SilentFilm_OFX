@@ -20,12 +20,17 @@ import cadence_frame_provider as provider
 class Environments(unittest.TestCase):
     def test_windows_child_does_not_inherit_gtk_libraries(self):
         original = {"PATH": "gtk;native", "SILENTFILM_NATIVE_PATH": "native", "PYTHONHOME": "wrong",
-                    "GI_TYPELIB_PATH": "gtk", "PYGI_DLL_PATH": "gtk", "GSETTINGS_SCHEMA_DIR": "gtk"}
+                    "GI_TYPELIB_PATH": "gtk", "PYGI_DLL_PATH": "gtk", "GSETTINGS_SCHEMA_DIR": "gtk",
+                    "GDK_PIXBUF_MODULE_FILE": "gtk-cache", "GDK_PIXBUF_MODULEDIR": "gtk-loaders",
+                    "FONTCONFIG_FILE": "gtk-fonts", "FONTCONFIG_PATH": "gtk-config", "GTK_EXE_PREFIX": "gtk",
+                    "GIO_MODULE_DIR": "gtk-gio", "GIO_EXTRA_MODULES": "gtk-extra"}
         with patch.object(platform, "WINDOWS", True), patch.dict(os.environ, original, clear=True):
             child = platform.child_environment()
             self.assertEqual(child["PATH"], "native")
             self.assertEqual(child["PYTHONIOENCODING"], "utf-8")
-            for key in ("PYTHONHOME", "GI_TYPELIB_PATH", "PYGI_DLL_PATH", "GSETTINGS_SCHEMA_DIR"):
+            for key in ("PYTHONHOME", "GI_TYPELIB_PATH", "PYGI_DLL_PATH", "GSETTINGS_SCHEMA_DIR",
+                        "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR", "FONTCONFIG_FILE",
+                        "FONTCONFIG_PATH", "GTK_EXE_PREFIX", "GIO_MODULE_DIR", "GIO_EXTRA_MODULES"):
                 self.assertNotIn(key, child)
             self.assertEqual(os.environ["PATH"], "gtk;native")
 
