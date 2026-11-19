@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$VcpkgRoot,
     [switch]$Cuda,
     [switch]$Cadence,
+    [ValidateSet('VisualStudio', 'Ninja')][string]$Generator = 'VisualStudio',
     [string]$MsysRoot = 'C:\msys64',
     [string]$CudaRoot = $env:CUDA_PATH,
     [ValidatePattern('^[0-9]+(;[0-9]+)*$')][string]$CudaArchitectures = '86',
@@ -21,6 +22,7 @@ if (!(Test-Path (Join-Path $VcpkgRoot 'installed/x64-silentfilm/include/fftw3.h'
 }
 $variant = if ($Cuda) { 'cuda' } else { 'cpu' }
 if ($Cadence) { $variant = "cadence-$variant" }
+if ($Generator -eq 'Ninja') { $variant = "$variant-ninja" }
 $build = Join-Path $repo "build-windows-$variant"
 $stage = Join-Path $build 'stage'
 $toolset = 'v143,version=14.39'
@@ -30,11 +32,36 @@ if ($Cuda) {
     if (!(Test-Path (Join-Path $CudaRoot 'bin/nvcc.exe'))) { throw 'nvcc.exe not found.' }
     $toolset += ",cuda=$CudaRoot"
 }
-$configure = @('-S', $repo, '-B', $build, '-G', 'Visual Studio 17 2022', '-A', 'x64',
-    '-T', $toolset, '-DSILENTFILM_BUILD_CADENCE=OFF', '-DBUILD_TESTING=ON',
+$configure = @('-S', $repo, '-B', $build, '-DSILENTFILM_BUILD_CADENCE=OFF', '-DBUILD_TESTING=ON',
     "-DOFX_INCLUDE_DIR=$OfxIncludeDir", "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot/scripts/buildsystems/vcpkg.cmake",
     '-DVCPKG_TARGET_TRIPLET=x64-silentfilm', "-DVCPKG_OVERLAY_TRIPLETS=$repo/cmake/triplets",
     '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL')
+if ($Generator -eq 'VisualStudio') {
+    $configure += @('-G', 'Visual Studio 17 2022', '-A', 'x64', '-T', $toolset)
+} else {
+    # vcvarsall вызывается в CMD wrapper: меняется только окружение дочернего процесса.
+    if ($env:VSCMD_ARG_TGT_ARCH -ne 'x64' -or $env:VSCMD_ARG_HOST_ARCH -ne 'x64' -or
+        $env:VCToolsVersion -notlike '14.39.*' -or !$env:VCToolsInstallDir -or !$env:VSINSTALLDIR) {
+        throw 'Ninja requires the MSVC 14.39 x64 environment. Use scripts/windows/Build-Windows-Ninja.cmd from a normal PowerShell window.'
+    }
+    $compiler = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64/cl.exe'
+    if (!(Test-Path $compiler)) { throw "MSVC x64 compiler not found: $compiler" }
+    $activeCompiler = (Get-Command cl.exe -ErrorAction Stop).Source
+    if ([IO.Path]::GetFullPath($activeCompiler) -ine [IO.Path]::GetFullPath($compiler)) {
+        throw 'The first cl.exe in PATH does not match MSVC 14.39 x64. Open a normal PowerShell and use Build-Windows-Ninja.cmd.'
+    }
+    $ninja = Join-Path $env:VSINSTALLDIR 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe'
+    if (!(Test-Path $ninja)) {
+        $ninjaCommand = Get-Command ninja.exe -ErrorAction SilentlyContinue
+        if (!$ninjaCommand) { throw 'ninja.exe not found. Install Ninja or the Visual Studio C++ CMake tools.' }
+        $ninja = $ninjaCommand.Source
+    }
+    Write-Host "Ninja compiler: $compiler"
+    $configure += @('-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', "-DCMAKE_CXX_COMPILER=$compiler", "-DCMAKE_MAKE_PROGRAM=$ninja")
+    if ($Cuda) {
+        $configure += @("-DCMAKE_CUDA_COMPILER=$CudaRoot/bin/nvcc.exe", "-DCMAKE_CUDA_HOST_COMPILER=$compiler")
+    }
+}
 if ($Cuda) {
     $configure += @('-DSILENTFILM_ENABLE_CUDA=ON', "-DCUDAToolkit_ROOT=$CudaRoot",
         "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures")
