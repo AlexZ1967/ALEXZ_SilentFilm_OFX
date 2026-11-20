@@ -120,6 +120,10 @@ Launcher предпочитает bundled runtime, изолированный Py
 
 **Не проверено:** wrapper, Windows configure/build/CTest, CUDA Ninja. Linux и установленный SDK/VS/Resolve не менялись; обычная VisualStudio ветка сохранена. Следующий шаг — пользователь открывает обычный PowerShell, обновляет исходники, выполняет CPU OFX wrapper и присылает лог; затем Cadence/CUDA. Installer остаётся отдельной нерешённой проблемой, Ninja не объявлять его исправлением. Соседняя незакоммиченная работа Bin Sync/tools и прежние изменения handoff/плана сохраняются.
 
+## Bin Sync перенесён — 2026-11-20
+
+Исходник Bin Sync и его документация перенесены в отдельный локальный репозиторий `/home/alex/Projects/ALEXZ_BIN_Sync_Resolve` и зафиксированы коммитом `d4eb763`. Дальнейшая работа и история Bin Sync ведутся в его `docs/SESSION_HANDOFF.md`.
+
 ## Windows: зависимости установлены, MSBuild заблокирован — 2026-11-19
 
 ✅ **2026-11-19 — по пользовательскому логу подтверждена установка Windows Cadence dependencies:** FFTW3.3.11/x64-silentfilm (1.7мин), затем FFmpeg9.0.2/OpenCV4.14.0/Zstd1.5.7 и вспомогательные пакеты/x64-silentfilm-media; итог «All requested installations completed successfully in:21min» и «Cadence dependencies prepared». Это подтверждение зависимостей, не сборки нашего проекта. В ходе загрузок были Schannel CRYPT_E_REVOCATION_OFFLINE, медленные/недоступные MSYS mirrors; применён пользователем процессный VCPKG_SSL_REVOKE_BEST_EFFORT=1 и ручной кэш архива.
